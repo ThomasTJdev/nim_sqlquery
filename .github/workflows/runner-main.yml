@@ -1,0 +1,69 @@
+name: Build nim_sqlquery
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      nimversion:
+        required: true
+        type: string
+
+
+jobs:
+  build:
+    permissions:
+      contents: write
+      packages: write
+
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Nim binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimdir
+            ~/.nimble
+          key: "nim-${{ inputs.nimversion }}"
+
+      - name: Check for cached Nim binaries
+        id: nim-binaries-cache
+        run: |
+          if [ -f "nimdir/bin/nim" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Nim (if not cached)
+        if: steps.nim-binaries-cache.outputs.found == 'false'
+        uses: iffy/install-nim@v5
+        with:
+          version: ${{ inputs.nimversion }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add cached Nim to PATH
+        if: steps.nim-binaries-cache.outputs.found == 'true'
+        run: |
+          echo "${{ github.workspace }}/nimdir/bin" >> $GITHUB_PATH
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Print Nim version
+        run: |
+          nim -v
+
+      - name: Print Nimble version
+        run: |
+          nimble -v
+
+      - name: Nimble check
+        run: |
+          nimble check
+
+      - name: Test run
+        run: |
+          nimble test

@@ -1,0 +1,22 @@
+name: Build main
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    branches:
+      - 'main'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  build-matrix:
+    uses: ./.github/workflows/runner-main.yml
+    with:
+      nimversion: 'binary:2.2.6
+    secrets: inherit
+
