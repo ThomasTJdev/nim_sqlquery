@@ -17,6 +17,6 @@ jobs:
   build-matrix:
     uses: ./.github/workflows/runner-main.yml
     with:
-      nimversion: 'binary:2.2.6
+      nimversion: 'binary:2.2.6'
     secrets: inherit
 
