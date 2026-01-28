@@ -841,6 +841,13 @@ macro selectQuery*(
             if not validateFieldExists(fieldStr).valid:
               sqlError("[WHERE] Where field '" & fieldStr & "' does not exist")
 
+          # Some specific scenarios we know will fail, but we support
+          # something close to it.
+          let symbolNode = whereExpr[1]
+          if symbolNode.kind == nnkStrLit:
+            let symbolStr = symbolNode.strVal
+            if symbolStr.startsWith("= ANY(::"):
+              error("= ANY(::) is not supported. Use = ANY(?::type[]) instead")
 
   elif where == nil:
     # Handle nil case - create empty where

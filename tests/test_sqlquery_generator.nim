@@ -379,3 +379,12 @@ suite "compile time errors":
       select = @["actions.id", "actions.name"],
       order = @[("actions.phas", DESC)]
     ))
+
+  test "any without placeholder should error = ANY(::type[])":
+    # Should fail to compile when using = ANY(::type[]) without the ? placeholder.
+    # The correct format is = ANY(?::type[]), with ? before the ::
+    check not compiles(selectQuery(
+      table = "actions",
+      select = @["actions.id", "actions.name", "actions.status"],
+      where = @[("actions.status", "= ANY(::int[])", "1,2,3")]
+    ))
