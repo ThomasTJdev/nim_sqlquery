@@ -108,6 +108,9 @@ proc sqlError(message: varargs[string, `$`]) =
       quit(1)
   # raise newException(SqlValidationError, errorMsg)
 
+proc compileError(message: varargs[string, `$`]) =
+  error(message.join(" "))
+
 proc sqlWarning(message: varargs[string, `$`]) =
   let warningMsg = "\e[33mWarning:\e[0m " & message.join(" ")
   logWarn warningMsg
@@ -667,7 +670,7 @@ macro selectQuery*(
   # :== Validate table
   #
   if not validateTableExists(table):
-    sqlError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
+    compileError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
 
 
 
@@ -725,7 +728,7 @@ macro selectQuery*(
         # Generate validation for join table
         if tableName != "":
           if not validateTableExists(tableName):
-            sqlError("Join table '" & tableName & "' does not exist. Valid tables: " & tableNamesConstList.join(", "), tableName)
+            compileError("Join table '" & tableName & "' does not exist. Valid tables: " & tableNamesConstList.join(", "), tableName)
 
           # Validate ON clause fields
           for onClause in onClauses:
@@ -739,9 +742,9 @@ macro selectQuery*(
                   if hasAlias:
                     let split = primaryFieldStr.split(".")
                     if not validateFieldExists(tableName & "." & split[1]).valid:
-                      sqlError("[JOIN PRIMARY] Primary field '" & primaryFieldStr & "' does not exist in table 1")
+                      compileError("[JOIN PRIMARY] Primary field '" & primaryFieldStr & "' does not exist in table 1")
                   else:
-                    sqlError("[JOIN PRIMARY] Primary field '" & primaryFieldStr & "' does not exist in table 2")
+                    compileError("[JOIN PRIMARY] Primary field '" & primaryFieldStr & "' does not exist in table 2")
 
               if secondaryField.kind == nnkStrLit:
                 let secondaryFieldStr = secondaryField.strVal
@@ -750,9 +753,9 @@ macro selectQuery*(
                     if hasAlias:
                       let split = secondaryFieldStr.split(".")
                       if not validateFieldExists(tableName & "." & split[1]).valid:
-                        sqlError("[JOIN SECONDARY] Secondary field '" & secondaryFieldStr & "' does not exist in table 1")
+                        compileError("[JOIN SECONDARY] Secondary field '" & secondaryFieldStr & "' does not exist in table 1")
                     else:
-                      sqlError("[JOIN SECONDARY] Secondary field '" & secondaryFieldStr & "' does not exist in table 2")
+                      compileError("[JOIN SECONDARY] Secondary field '" & secondaryFieldStr & "' does not exist in table 2")
 
   elif joins == nil:
     # Handle nil case - create empty joins
@@ -772,7 +775,7 @@ macro selectQuery*(
           if fieldStr.contains("*"):
             continue
           if "." notin fieldStr and joins != nil:
-            sqlError("[selectQuery - SELECT] Field '" & `fieldStr` & "' is missing table name. Table names are required when using joins.")
+            compileError("[selectQuery - SELECT] Field '" & `fieldStr` & "' is missing table name. Table names are required when using joins.")
 
           # Potential function
           if "(" in fieldStr and ")" in fieldStr:
@@ -800,9 +803,9 @@ macro selectQuery*(
                     pass = true
                     break
               if not pass:
-                sqlError("[SELECT] Field '" & fieldStr & "' does not exist 1")
+                compileError("[SELECT] Field '" & fieldStr & "' does not exist 1")
             else:
-              sqlError("[SELECT] Field '" & fieldStr & "' does not exist 2")
+              compileError("[SELECT] Field '" & fieldStr & "' does not exist 2")
 
 
   #
@@ -834,12 +837,12 @@ macro selectQuery*(
 
             if "." notin fieldStr:
               if joins != nil:
-                sqlError("[selectQuery - WHERE] Where field '" & fieldStr & "' is missing table name. Table names are required when using joins.")
+                compileError("[selectQuery - WHERE] Where field '" & fieldStr & "' is missing table name. Table names are required when using joins.")
               else:
                 fieldStr = table & "." & fieldStr
 
             if not validateFieldExists(fieldStr).valid:
-              sqlError("[WHERE] Where field '" & fieldStr & "' does not exist")
+              compileError("[WHERE] Where field '" & fieldStr & "' does not exist")
 
           # Some specific scenarios we know will fail, but we support
           # something close to it.
@@ -851,7 +854,7 @@ macro selectQuery*(
 
   elif where == nil:
     # Handle nil case - create empty where
-    sqlError("Where cannot be empty")
+    compileError("Where cannot be empty")
     #processedWhere = newCall("@", newNimNode(nnkBracket))
 
 
@@ -871,7 +874,7 @@ macro selectQuery*(
               fieldStr = table & "." & fieldStr
 
             if not validateFieldExists(fieldStr).valid:
-              sqlError("[ORDER BY] Order by field '" & fieldStr & "' does not exist in table '" & table & "'")
+              compileError("[ORDER BY] Order by field '" & fieldStr & "' does not exist in table '" & table & "'")
 
   elif order == nil:
     # Handle nil case - create empty order
@@ -909,7 +912,7 @@ macro selectQuery*(
                 break
 
           if not pass:
-            sqlError("[GROUP BY] Group by field '" & groupByStr & "' does not exist in table '" & table & "'")
+            compileError("[GROUP BY] Group by field '" & groupByStr & "' does not exist in table '" & table & "'")
 
   elif groupBy == nil:
     # Handle nil case - create empty group by
@@ -933,7 +936,7 @@ macro deleteQuery*(
   # :== Validate table
   #
   if not validateTableExists(table):
-    sqlError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
+    compileError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
 
   #
   # :== Validate WHERE clause fields
@@ -957,13 +960,13 @@ macro deleteQuery*(
             let fieldTable = parts[0]
 
             if not validateFieldExists(fieldStr).valid:
-              sqlError("[deleteQuery - WHERE] Where field '" & fieldStr & "' does not exist. Table: " & table & ".")
+              compileError("[deleteQuery - WHERE] Where field '" & fieldStr & "' does not exist. Table: " & table & ".")
             if fieldTable != table:
-              sqlError("[deleteQuery - WHERE] Where field '" & fieldStr & "' does not exist in table '" & fieldTable & "'")
+              compileError("[deleteQuery - WHERE] Where field '" & fieldStr & "' does not exist in table '" & fieldTable & "'")
 
   elif where == nil:
     # Handle nil case - create empty where
-    sqlError("Where cannot be empty")
+    compileError("Where cannot be empty")
 
   #
   # :== Generate the final call
@@ -983,7 +986,7 @@ macro updateQuery*(
   # :== Validate table
   #
   if not validateTableExists(table):
-    sqlError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
+    compileError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
 
   #
   # :== Validate data
@@ -1004,15 +1007,15 @@ macro updateQuery*(
               fieldStr = fieldStr.split(" = ")[0]
 
             if "." in fieldStr:
-              sqlError("[updateQuery - UPDATE] Update set includes table name when setting field '" & fieldStr & "'. The values in update data may not contain table name.")
+              compileError("[updateQuery - UPDATE] Update set includes table name when setting field '" & fieldStr & "'. The values in update data may not contain table name.")
 
             var fieldName = table & "." & fieldStr
             if not validateFieldExists(fieldName).valid:
-              sqlError("[updateQuery - UPDATE] Data field '" & fieldStr & "' does not exist in table '" & table & "'")
+              compileError("[updateQuery - UPDATE] Data field '" & fieldStr & "' does not exist in table '" & table & "'")
 
   elif data == nil:
     # Handle nil case - create empty data
-    sqlError("Data cannot be empty")
+    compileError("Data cannot be empty")
 
   #
   # :== Validate where
@@ -1050,12 +1053,12 @@ macro updateQuery*(
             let fieldTable = parts[0]
 
             if not validateFieldExists(fieldStr).valid:
-              sqlError("[updateQuery - WHERE] Where field '" & fieldStr & "' does not exist. Table: " & table & ".")
+              compileError("[updateQuery - WHERE] Where field '" & fieldStr & "' does not exist. Table: " & table & ".")
             if fieldTable != table:
-              sqlError("[updateQuery - WHERE] Where field '" & fieldStr & "' does not exist in table '" & fieldTable & "'")
+              compileError("[updateQuery - WHERE] Where field '" & fieldStr & "' does not exist in table '" & fieldTable & "'")
   elif where == nil:
     # Handle nil case - create empty where
-    sqlError("Where cannot be empty")
+    compileError("Where cannot be empty")
 
   #
   # :== Generate the final call
@@ -1074,7 +1077,7 @@ macro insertQuery*(
   # :== Validate table
   #
   if not validateTableExists(table):
-    sqlError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
+    compileError("Table '" & table & "' does not exist. Valid tables: " & tableNamesConstList.join(", "))
 
   #
   # :== Validate data
@@ -1098,11 +1101,11 @@ macro insertQuery*(
               sqlWarning("[insertQuery - INSERT] SQL WARNING: Insert set includes table name when setting field '" & fieldStr & "'. The values in insert data may not contain table name.")
 
             if not validateFieldExists(fieldName).valid:
-              sqlError("[insertQuery - INSERT] Data field '" & fieldStr & "' does not exist in table '" & table & "'")
+              compileError("[insertQuery - INSERT] Data field '" & fieldStr & "' does not exist in table '" & table & "'")
 
   elif data == nil:
     # Handle nil case - create empty data
-    sqlError("Data cannot be empty")
+    compileError("Data cannot be empty")
 
   #
   # :== Generate the final call
