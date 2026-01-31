@@ -18,6 +18,26 @@ else:
 const SqlSchemaPath {.strdefine.} = "resources/sql/schema"
 const SqlSchemaSoftDeleteMarker {.strdefine.} = "is_deleted"
 
+# Nim reserved keywords that cannot be used as identifiers directly.
+# These will be prefixed with "nim_" when used as enum field names.
+const NimReservedKeywords = [
+  "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast",
+  "concept", "const", "continue", "converter", "defer", "discard", "distinct",
+  "div", "do", "elif", "else", "end", "enum", "except", "export", "finally",
+  "for", "from", "func", "if", "import", "in", "include", "interface",
+  "is", "isnot", "iterator", "let", "macro", "method", "mixin", "mod",
+  "nil", "not", "notin", "object", "of", "or", "out", "proc", "ptr",
+  "raise", "ref", "return", "shl", "shr", "static", "template", "try",
+  "tuple", "type", "using", "var", "when", "while", "xor", "yield"
+]
+
+proc escapeNimKeyword(name: string): string =
+  ## Escapes Nim reserved keywords by prefixing with "nim_".
+  ## Non-reserved words are returned unchanged.
+  if name in NimReservedKeywords:
+    return "nim_" & name
+  return name
+
 macro generateEnumsFromSQL(dir: static string): untyped =
   ## Reads SQL schema files and generates Nim enums from the table columns.
   ## Returns a Nim AST containing the enum definitions.
@@ -132,12 +152,11 @@ macro generateEnumsFromSQL(dir: static string): untyped =
       enumTy.add(newEmptyNode())
 
       for col in columns:
-        # ! For now skip here. Nim does not allow for keyword `method`
-        if col == "method":
-          continue
+        # Escape Nim reserved keywords by prefixing with "nim_"
+        let escapedCol = escapeNimKeyword(col)
         enumTy.add(newTree(nnkEnumFieldDef,
-          ident(col),
-          newLit(tableName & "." & col)
+          ident(escapedCol),
+          newLit(tableName & "." & col)  # Keep original SQL column name in value
         ))
 
       enumDef.add(enumTy)
@@ -155,7 +174,8 @@ macro generateEnumsFromSQL(dir: static string): untyped =
     var objectFields = newNimNode(nnkRecList)
 
     for field in fields:
-      if field == "method": continue # Skip Nim keywords
+      # Escape Nim reserved keywords by prefixing with "nim_"
+      let escapedField = escapeNimKeyword(field)
 
       # Determine field type based on common patterns
       var fieldType = ident("string") # Default to string
@@ -167,7 +187,7 @@ macro generateEnumsFromSQL(dir: static string): untyped =
         fieldType = ident("bool")
 
       objectFields.add(newNimNode(nnkIdentDefs).add(
-        postfix(ident(field), "*"),
+        postfix(ident(escapedField), "*"),
         fieldType,
         newEmptyNode()
       ))
@@ -222,12 +242,9 @@ macro generateEnumsFromSQL(dir: static string): untyped =
     # Create const name like "usersFields*"
     let constName = postfix(ident(tableName & "SqlFields"), "*")
 
-    # Create array of field names
+    # Create array of field names (keep original SQL column names for validation)
     var fieldArray = newNimNode(nnkBracket)
     for field in fields:
-      # Skip the "method" field as mentioned in the original code
-      if field == "method":
-        continue
       fieldArray.add(newLit(field))
 
     # Create the const definition

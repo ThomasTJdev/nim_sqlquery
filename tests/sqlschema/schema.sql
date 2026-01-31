@@ -64,3 +64,15 @@ CREATE TABLE IF NOT EXISTS checklists (
   project_id INTEGER,
   creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- API requests table: represents HTTP API request logs
+-- Note: "method" is a reserved word in many languages, testing column name handling
+CREATE TABLE IF NOT EXISTS api_requests (
+  id SERIAL PRIMARY KEY,
+  method VARCHAR(10) NOT NULL,
+  endpoint VARCHAR(255) NOT NULL,
+  status_code INTEGER,
+  response_time_ms INTEGER,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  is_deleted TIMESTAMP DEFAULT NULL
+);

@@ -184,6 +184,40 @@ suite "selectQuery":
     check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project as p ON p.id = actions.project_id WHERE actions.project_id = ? AND actions.is_deleted IS NULL GROUP BY p.name"
     check base.params == @["123"]
 
+  test "table with reserved word column name (method) using strings":
+    # Test table with column named "method" which is a reserved word in Nim.
+    # When using string literals, use the original SQL column name "method".
+    let query = selectQuery(
+      table = "api_requests",
+      select = @["api_requests.id", "api_requests.method", "api_requests.endpoint", "api_requests.status_code"],
+      where = @[
+        ("api_requests.method", "=", "POST"),
+        ("api_requests.status_code", ">=", "400")
+      ],
+      order = @[("api_requests.created_at", DESC)],
+      limit = 100
+    )
+
+    check query.sql == "SELECT api_requests.id, api_requests.method, api_requests.endpoint, api_requests.status_code FROM api_requests WHERE api_requests.method = ? AND api_requests.status_code >= ? AND api_requests.is_deleted IS NULL ORDER BY api_requests.created_at DESC LIMIT 100"
+    check query.params == @["POST", "400"]
+
+  test "table with reserved word column name (method) using enum":
+    # When using enums, Nim reserved keywords are prefixed with "nim_".
+    # The enum value still produces the correct SQL column name "method".
+    let query = selectQuery(
+      table = "api_requests",
+      select = @["api_requests.id", "api_requests.method", "api_requests.endpoint"],
+      where = @[
+        ("api_requests.method", "=", "GET"),
+        ("api_requests.status_code", "<", "300")
+      ],
+      order = @[("api_requests.created_at", ASC)],
+      limit = 50
+    )
+
+    check query.sql == "SELECT api_requests.id, api_requests.method, api_requests.endpoint FROM api_requests WHERE api_requests.method = ? AND api_requests.status_code < ? AND api_requests.is_deleted IS NULL ORDER BY api_requests.created_at ASC LIMIT 50"
+    check query.params == @["GET", "300"]
+
 
 suite "select get()":
   test "base":
