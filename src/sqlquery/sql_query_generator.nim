@@ -452,11 +452,11 @@ proc parseSetData(table: string, data: seq[UpdateSpec]): tuple[data: seq[string]
   for item in data:
     let field = item.field
     let value = item.value
-    var fieldCheck = field
+    var fieldCheck = field.toLowerAscii()
     let fieldHasStatement = field.contains(" = ")
     let fieldHasParameter = field.contains("?")
     if fieldHasStatement:
-      fieldCheck = field.split(" = ")[0]
+      fieldCheck = field.split(" = ")[0].toLowerAscii()
 
     if "." notin fieldCheck:
       fieldCheck = table & "." & fieldCheck
@@ -1001,7 +1001,7 @@ macro updateQuery*(
         if dataExpr.kind == nnkTupleConstr and dataExpr.len > 0:
           let fieldNode = dataExpr[0]
           if fieldNode.kind == nnkStrLit:
-            var fieldStr = fieldNode.strVal
+            var fieldStr = fieldNode.strVal.toLowerAscii()
 
             if " = " in fieldStr:
               fieldStr = fieldStr.split(" = ")[0]

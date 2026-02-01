@@ -368,6 +368,18 @@ suite "updateQuery":
     check query.sql == "UPDATE checklists SET status = ? WHERE (description IS NULL OR length(description) <> ?) AND checklists.id = ?"
     check query.params == @["1", "243", "789"]
 
+  test "case_insensitive_field_names":
+    # Field names with mixed case should be normalized to lowercase
+    # and compile successfully (previously would fail at compile time)
+    let base = updateQuery(
+      table = "actions",
+      data = @[("Name", "updated"), ("DESCRIPTION", "new description")],
+      where = @[("actions.id", "=", "123")]
+    )
+
+    check base.sql == "UPDATE actions SET name = ?, description = ? WHERE actions.id = ?"
+    check base.params == @["updated", "new description", "123"]
+
 
 suite "insertQuery":
   test "base":
