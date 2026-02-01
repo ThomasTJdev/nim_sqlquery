@@ -480,7 +480,7 @@ proc parseSetData(table: string, data: seq[UpdateSpec]): tuple[data: seq[string]
 
 proc parseInsertData(table: string, data: seq[InsertSpec]): tuple[fields: seq[string], values: seq[string], params: seq[string]] =
   for item in data:
-    var field = item.field
+    var field = item.field.toLowerAscii()
     let value = item.value
     var validateField = field
     if not field.contains("."):
@@ -1092,7 +1092,7 @@ macro insertQuery*(
         if dataExpr.kind == nnkTupleConstr and dataExpr.len > 0:
           let fieldNode = dataExpr[0]
           if fieldNode.kind == nnkStrLit:
-            let fieldStr = fieldNode.strVal
+            let fieldStr = fieldNode.strVal.toLowerAscii()
             let parts = fieldStr.split(".")
             var fieldName = fieldStr
             if parts.len == 1:

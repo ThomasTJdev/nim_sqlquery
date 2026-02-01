@@ -388,6 +388,17 @@ suite "insertQuery":
     check base.sql == "INSERT INTO project (name, description, date_end) VALUES (?, NULL, ?)"
     check base.params == @["test", "2024-01-01"]
 
+  test "case_insensitive_field_names":
+    # Field names with mixed case should be normalized to lowercase
+    # and compile successfully (previously would fail at compile time)
+    let base = insertQuery(
+      table = "actions",
+      data = @[("Name", "test"), ("DESCRIPTION", "my description"), ("Date_End", "2024-06-15")]
+    )
+
+    check base.sql == "INSERT INTO actions (name, description, date_end) VALUES (?, ?, ?)"
+    check base.params == @["test", "my description", "2024-06-15"]
+
 
 suite "compile time errors":
   test "invalid column name in join condition":
