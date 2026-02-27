@@ -32,10 +32,13 @@ proc getDb(): DbConn =
 proc runSchema(conn: DbConn) =
   # Each CREATE TABLE ends with ");\n" - split on that so we run complete statements.
   # Splitting on ';' alone would cut inside CREATE TABLE (e.g. after "NULL") and break.
+  # Chunks may have leading comments (e.g. "-- Person table..."), so find CREATE TABLE.
   for chunk in SchemaSql.split(");"):
-    let stmt = chunk.strip
-    if stmt.len > 0 and stmt.startsWith("CREATE TABLE"):
-      conn.exec(SqlQuery(stmt & ");"))
+    let idx = chunk.find("CREATE TABLE")
+    if idx >= 0:
+      let stmt = chunk[idx..^1].strip
+      if stmt.len > 0:
+        conn.exec(SqlQuery(stmt & ");"))
 
 
 template withDb(body: untyped) =
