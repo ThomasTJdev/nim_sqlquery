@@ -16,6 +16,30 @@ suite "selectQuery":
     check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project ON project.id = actions.project_id AND project.is_deleted IS NULL WHERE actions.project_id = ANY(?::int[]) AND actions.is_deleted IS NULL"
     check base.params == @["{123,456}"]
 
+  test "any not in - <> ALL(?::int[])":
+    # Exclude rows whose project_id is in the given array (NOT IN semantics).
+    let base = selectQuery(
+          table = "actions",
+          select = @["actions.id", "actions.name", "actions.status"],
+          joins = @[("project", LEFTJOIN, @[("project.id", "=", "actions.project_id")])],
+          where = @[("actions.project_id", "<> ALL(?::int[])", "123,456")],
+        )
+    check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project ON project.id = actions.project_id AND project.is_deleted IS NULL WHERE actions.project_id <> ALL(?::int[]) AND actions.is_deleted IS NULL"
+    check base.params == @["{123,456}"]
+
+  test "any not in - <> ALL(?::text[]) with extra condition":
+    # <> ALL with text array and another where clause.
+    let base = selectQuery(
+          table = "actions",
+          select = @["actions.id", "actions.name"],
+          where = @[
+            ("actions.status", "<> ALL(?::text[])", "cancelled,archived"),
+            ("actions.id", ">", "0"),
+          ],
+        )
+    check base.sql == "SELECT actions.id, actions.name FROM actions WHERE actions.status <> ALL(?::text[]) AND actions.id > ? AND actions.is_deleted IS NULL"
+    check base.params == @["{cancelled,archived}", "0"]
+
   test "override where structure":
     let base = selectQuery(
           table = "actions",

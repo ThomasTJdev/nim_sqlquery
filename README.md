@@ -2,7 +2,11 @@
 
 An opinionated SQL query builder for Nim with compile-time schema validation. This library generates type-safe SQL queries while automatically handling common patterns like soft deletes.
 
-> **Note**: This library relies on [waterpark](https://github.com/guzba/waterpark) for PostgreSQL connection pooling when using library macros and templates for fetching, such as `selectRows`, `selectRow`, `selectValue`, etc. Query generation such as `selectQuery`, `insertQuery`, etc. **does not** require waterpark.
+> **Note**: You can use the library in two ways for executing queries:
+> - **With a normal `DbConn`** (e.g. from `std/db_sqlite`, `std/db_postgres`): pass the connection as a named argument to `selectRows(db = ..., ...)`, `selectRow(db = ..., ...)`, `updateValues(db = ..., ...)`, and the other execution macros. **Waterpark is not required** — all of these macros accept `db: DbConn` as the first argument.
+> - **With [waterpark](https://github.com/guzba/waterpark)** for PostgreSQL connection pooling: use the same macros without a connection argument (e.g. `selectRows(table = "...", ...)`); they will use the global `pg` pool.
+>
+> Query generation (`selectQuery`, `insertQuery`, etc.) **does not** require waterpark and works with any database flow.
 
 ## Overview
 
@@ -124,15 +128,41 @@ echo query.params
 
 ### Executing Queries and Accessing Results
 
-The library provides convenient macros for executing queries and working with results:
+The library provides convenient macros for executing queries and working with results. You can use a **normal `DbConn`** (no waterpark) by passing it as the first argument:
 
-#### Using `selectRows` to Fetch Multiple Rows
+#### Using a normal DbConn (no waterpark)
+
+Waterpark is not required. All execution macros (`selectRows`, `selectRow`, `updateValues`, etc.) accept a `DbConn` as the first argument:
+
+```nim
+import std/db_sqlite  # or std/db_postgres
+import sqlquery
+
+let db = open("mydb.sqlite", "", "", "")  # or open a Postgres connection
+
+# Pass db as first argument; works with any DbConn
+let data = selectRows(db,
+  table = "company_daily_engagement",
+  select = @["company_id"],
+  where = @[
+    ("company_id", "=", companyId),
+    ("epoch_day", ">=", $epoch14dAgo),
+    ("sql:>status IN ('warning', 'critical')", "", ""),
+  ]
+)
+
+for row in loopRows(data):
+  echo row.get("company_id")
+db.close()
+```
+
+#### Using `selectRows` with waterpark (optional)
 
 ```nim
 # Initialize your database connection pool (waterpark library)
 pg = newPostgresPool("your_connection_string")
 
-# Execute query and get all rows
+# Execute query and get all rows (no db argument – uses pg pool)
 let rows = selectRows(
   table = "users",
   select = @["users.id", "users.name", "users.email"],
@@ -199,10 +229,12 @@ let query = selectQuery(
   where = @[
     ("sql:>users.status = 'active' OR users.creation > NOW() - INTERVAL '1 day'", "", ""),
     ("users.email", "IS NOT", "NULL"),
-    ("users.id", "= ANY(?::int[])", "1,2,3,4")
+    ("users.id", "= ANY(?::int[])", "1,2,3,4"),
+    ("users.status", "<> ALL(?::text[])", "banned,archived")  # NOT IN: value not in array
   ]
 )
 
+# = ANY(?::type[]) means "value IN array"; <> ALL(?::type[]) means "value NOT IN array".
 # The sql:> prefix bypasses validation and wraps the expression in parentheses
 # ⚠️ Only use with compile-time constants, never with user input!
 ```
@@ -258,8 +290,10 @@ let query = selectQuery(
 
 ** Safe - Array Parameters**
 
+Use `= ANY(?::type[])` for "value IN array" and `<> ALL(?::type[])` for "value NOT IN array". Both are safely parameterized.
+
 ```nim
-# Array parameters are also safely parameterized
+# IN array: = ANY(?::type[])
 let query = selectQuery(
   table = "actions",
   select = @["actions.id"],
@@ -267,6 +301,15 @@ let query = selectQuery(
 )
 # Generated SQL: WHERE actions.project_id = ANY(?::int[])
 # Parameters: @["{123,456}"]  # SAFE - parameterized, not concatenated
+
+# NOT IN array: <> ALL(?::type[])
+let query2 = selectQuery(
+  table = "actions",
+  select = @["actions.id"],
+  where = @[("actions.status", "<> ALL(?::text[])", "cancelled,archived")]
+)
+# Generated SQL: WHERE actions.status <> ALL(?::text[])
+# Parameters: @["{cancelled,archived}"]  # SAFE - parameterized
 ```
 
 ### Escape Hatches - Use with Extreme Caution

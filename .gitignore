@@ -7,3 +7,6 @@ tests/*
 !tests/*.nims
 !tests/sqlschema/
 !tests/sqlschema/schema.sql
+nimble.develop
+nimble.paths
+nimbledeps

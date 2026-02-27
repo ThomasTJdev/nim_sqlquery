@@ -62,6 +62,31 @@ proc logWarn(message: string) =
 
 
 #
+# Helper functions
+#
+proc sqlError(message: varargs[string, `$`]) =
+  let errorMsg = "\e[31mError:\e[0m " & message.join(" ")
+  logError errorMsg
+  when defined(dev):
+    echo getStackTrace()
+    when not defined(test):
+      quit(1)
+  # raise newException(SqlValidationError, errorMsg)
+
+proc compileError(message: varargs[string, `$`]) =
+  error(message.join(" "))
+
+proc sqlWarning(message: varargs[string, `$`]) =
+  let warningMsg = "\e[33mWarning:\e[0m " & message.join(" ")
+  logWarn warningMsg
+  when defined(dev):
+    echo getStackTrace()
+    when not defined(test):
+      quit(1)
+  # raise newException(SqlQueryWarning, warningMsg)
+
+
+#
 # Result parsers
 #
 proc get*(data: RowSelectionData, field: string): string {.raises: [].} =
@@ -86,38 +111,15 @@ proc get*(data: RowSelectionData, field: string): string {.raises: [].} =
         return data.row[i]
 
   when defined(dev):
-    logError("Field '" & fieldLower & "' not found in select. Query performed on base table '" & data.table & "'. Available fields: " & data.selected.join(", "))
-    quit(1)
+    sqlError("Field '" & fieldLower & "' not found in select. Query performed on base table '" & data.table & "'. Available fields: " & data.selected.join(", "))
   else:
-    logError("Field '" & fieldLower & "' not found in select. Query performed on base table '" & data.table & "'. Available fields: " & data.selected.join(", "))
+    sqlError("Field '" & fieldLower & "' not found in select. Query performed on base table '" & data.table & "'. Available fields: " & data.selected.join(", "))
     return ""
 
 iterator loopRows*(data: RowsSelectionData): RowSelectionData {.raises: [].} =
   for i in 0..data.rows.len()-1:
     yield (table: data.table, selected: data.selected, row: data.rows[i])
 
-
-#
-# Helper functions
-#
-proc sqlError(message: varargs[string, `$`]) =
-  let errorMsg = "\e[31mError:\e[0m " & message.join(" ")
-  logError errorMsg
-  when defined(dev):
-    when not defined(test):
-      quit(1)
-  # raise newException(SqlValidationError, errorMsg)
-
-proc compileError(message: varargs[string, `$`]) =
-  error(message.join(" "))
-
-proc sqlWarning(message: varargs[string, `$`]) =
-  let warningMsg = "\e[33mWarning:\e[0m " & message.join(" ")
-  logWarn warningMsg
-  when defined(dev):
-    when not defined(test):
-      quit(1)
-  # raise newException(SqlQueryWarning, warningMsg)
 
 
 #
@@ -250,9 +252,9 @@ proc parseWhere(where: seq[WhereSpec], requireTableName = true, table = "", vali
         if not validation.valid:
           sqlError("[WHERE] Field '" & fieldStr & "' does not exist in table '" & validation.tableName & "'", condition)
 
-        if symbol notin symbolList and not symbol.startsWith("= ANY(?"):
+        if symbol notin symbolList and not symbol.startsWith("= ANY(?") and not symbol.startsWith("<> ALL(?"):
           if symbol == "IN" or symbol == "NOT IN":
-            sqlError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) instead", condition)
+            sqlError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) or <> ALL(?::type[]) instead", condition)
           sqlError("Invalid symbol: " & symbol, "Allowed symbols: " & symbolList.join(", "), condition)
 
         allTables.add(validation.tableName)
@@ -290,7 +292,7 @@ proc parseWhere(where: seq[WhereSpec], requireTableName = true, table = "", vali
       statement = field & " " & symbol & " NULL"
     elif valueLower in ["true", "false"] and symbol in ["IS", "IS NOT"]:
       statement = field & " " & symbol & " " & value
-    elif symbol.startsWith("= ANY(?"):
+    elif symbol.startsWith("= ANY(?") or symbol.startsWith("<> ALL(?"):
       statement = field & " " & symbol
       result.params.add("{" & value & "}")
     elif value.contains("?"):
@@ -849,8 +851,8 @@ macro selectQuery*(
           let symbolNode = whereExpr[1]
           if symbolNode.kind == nnkStrLit:
             let symbolStr = symbolNode.strVal
-            if symbolStr.startsWith("= ANY(::"):
-              error("= ANY(::) is not supported. Use = ANY(?::type[]) instead")
+            if symbolStr.startsWith("= ANY(::") or symbolStr.startsWith("<> ALL(::") :
+              error("= ANY(::) or <> ALL(::) is not supported. Use = ANY(?::type[]) or <> ALL(?::type[]) instead")
 
   elif where == nil:
     # Handle nil case - create empty where
@@ -1128,7 +1130,8 @@ macro selectValue*(
   limit: int = 0,
   offset: int = 0,
   groupBy: untyped = nil,
-  ignoreDeleteMarker: bool = false
+  ignoreDeleteMarker: bool = false,
+  db: DbConn = nil
 ): untyped =
   result = quote do:
     var selectResult: string
@@ -1154,7 +1157,8 @@ macro selectRow*(
   limit: int = 0,
   offset: int = 0,
   groupBy: untyped = nil,
-  ignoreDeleteMarker: bool = false
+  ignoreDeleteMarker: bool = false,
+  db: DbConn = nil
 ): untyped =
   result = quote do:
     var selectResult: RowSelectionData
@@ -1163,8 +1167,13 @@ macro selectRow*(
     try:
       var query: QueryResultSelect = selectQuery(`table`, `select`, `joins`, `where`, `order`, `limit`, `offset`, `groupBy`, `ignoreDeleteMarker`)
       selectResult.selected = query.select
-      pg.withconnection conn:
-        selectResult.row = getRow(conn, sql(query.sql), query.params)
+      if db != nil:
+        selectResult.table = `table`
+        selectResult.selected = query.select
+        selectResult.row = getRow(db, sql(query.sql), query.params)
+      else:
+        pg.withconnection conn:
+          selectResult.row = getRow(conn, sql(query.sql), query.params)
     except SqlValidationError as e:
       logError(e.msg)
     except SqlQueryWarning as e:
@@ -1184,7 +1193,8 @@ macro selectRows*(
   offset: int = 0,
   groupBy: untyped = nil,
   ignoreDeleteMarker: bool = false,
-  debugPrintQuery: bool = false
+  debugPrintQuery: bool = false,
+  db: DbConn = nil
 ): untyped =
   result = quote do:
     var selectResult: RowsSelectionData
@@ -1196,12 +1206,17 @@ macro selectRows*(
         if `debugPrintQuery`:
           echo query.sql
           echo query.params
-      pg.withconnection conn:
-        # We're adding in each loop because each instance must be
-        # self-contained.
+      if db != nil:
         selectResult.table = `table`
         selectResult.selected = query.select
-        selectResult.rows = getAllRows(conn, sql(query.sql), query.params)
+        selectResult.rows = getAllRows(db, sql(query.sql), query.params)
+      else:
+        pg.withconnection conn:
+          # We're adding in each loop because each instance must be
+          # self-contained.
+          selectResult.table = `table`
+          selectResult.selected = query.select
+          selectResult.rows = getAllRows(conn, sql(query.sql), query.params)
     except SqlValidationError as e:
       logError(e.msg)
     except SqlQueryWarning as e:
@@ -1214,13 +1229,17 @@ macro selectRows*(
 template updateValue*(
   table: static string,
   data: untyped,
-  where: untyped
+  where: untyped,
+  db: DbConn = nil
 ): int64 =
   var result: int64 = 0
   try:
     var query: QueryResult = updateQuery(table, @[data], where)
-    pg.withconnection conn:
-      result = execAffectedRows(conn, sql(query.sql), query.params)
+    if db != nil:
+      result = execAffectedRows(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result = execAffectedRows(conn, sql(query.sql), query.params)
   except SqlValidationError as e:
     logError(e.msg)
   except SqlQueryWarning as e:
@@ -1236,7 +1255,8 @@ template updateValues*(
   table: static string,
   data: untyped,
   where: untyped,
-  debugPrintQuery: bool = false
+  debugPrintQuery: bool = false,
+  db: DbConn = nil
 ): int64 =
   var result: int64 = 0
   try:
@@ -1245,8 +1265,11 @@ template updateValues*(
       if debugPrintQuery:
         echo query.sql
         echo query.params
-    pg.withconnection conn:
-      result = execAffectedRows(conn, sql(query.sql), query.params)
+    if db != nil:
+      result = execAffectedRows(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result = execAffectedRows(conn, sql(query.sql), query.params)
   except SqlValidationError as e:
     logError(e.msg)
   except SqlQueryWarning as e:
@@ -1260,15 +1283,19 @@ template updateValues*(
 
 template deleteRows*(
   table: static string,
-  where: untyped
+  where: untyped,
+  db: DbConn = nil
 ): int64 =
   # Convert to template so the literal array syntax gets passed through
   # This enables compile-time field validation even when called from procs
   var result: int64 = 0
   try:
     var query: QueryResult = deleteQuery(table, where)
-    pg.withconnection conn:
-      result = execAffectedRows(conn, sql(query.sql), query.params)
+    if db != nil:
+      result = execAffectedRows(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result = execAffectedRows(conn, sql(query.sql), query.params)
   except SqlValidationError as e:
     logError(e.msg)
   except SqlQueryWarning as e:
@@ -1282,13 +1309,17 @@ template deleteRows*(
 
 template insertRow*(
   table: static string,
-  data: untyped
+  data: untyped,
+  db: DbConn = nil
 ): int64 =
   var result: int64 = 0
   try:
     var query: QueryResult = insertQuery(table, data)
-    pg.withconnection conn:
-      result = tryInsertID(conn, sql(query.sql), query.params)
+    if db != nil:
+      result = tryInsertID(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result = tryInsertID(conn, sql(query.sql), query.params)
   except SqlValidationError as e:
     logError(e.msg)
   except SqlQueryWarning as e:
@@ -1311,7 +1342,8 @@ proc selectRowsRuntime*(
   offset: int = 0,
   groupBy: seq[string] = @[],
   ignoreDeleteMarker: bool = false,
-  debugPrintQuery: bool = false
+  debugPrintQuery: bool = false,
+  db: DbConn = nil
 ): RowsSelectionData =
   var query: QueryResultSelect
   try:
@@ -1321,10 +1353,15 @@ proc selectRowsRuntime*(
         echo query.sql
         echo query.params
 
-    pg.withconnection conn:
+    if db != nil:
       result.table = table
       result.selected = query.select
-      result.rows = getAllRows(conn, sql(query.sql), query.params)
+      result.rows = getAllRows(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result.table = table
+        result.selected = query.select
+        result.rows = getAllRows(conn, sql(query.sql), query.params)
   except SqlValidationError as e:
     logError(e.msg)
     return
@@ -1345,7 +1382,8 @@ proc selectValueRuntime*(
   order: seq[OrderSpec] = @[],
   limit: int = 0,
   offset: int = 0,
-  debugPrintQuery: bool = false
+  debugPrintQuery: bool = false,
+  db: DbConn = nil
 ): string =
   var query: QueryResultSelect
   try:
@@ -1355,8 +1393,11 @@ proc selectValueRuntime*(
         echo query.sql
         echo query.params
 
-    pg.withconnection conn:
-      result = getValue(conn, sql(query.sql), query.params)
+    if db != nil:
+      result = getValue(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result = getValue(conn, sql(query.sql), query.params)
   except SqlValidationError as e:
     logError(e.msg)
     return
