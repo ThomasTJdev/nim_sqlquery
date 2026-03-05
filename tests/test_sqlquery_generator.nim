@@ -926,6 +926,22 @@ suite "multiple ON conditions in join":
     check "project.status = actions.status" in query.sql
     check "project.author_id = actions.assigned_to" in query.sql
 
+  test "join ON with sql:> for ANY(table.column) expression":
+    # sql:> in ON clause emits raw SQL (e.g. person.id = ANY(project.userids))
+    let query = selectQueryRuntime(
+      table = "person",
+      select = @["person.id", "person.name"],
+      joins = @[
+        ("project", LEFTJOIN, @[
+          ("project.author_id", "=", "person.id"),
+          ("person.id", "=", "sql:>ANY(project.userids)"),
+        ]),
+      ],
+      where = @[("person.id", "=", "1")]
+    )
+    check "project.author_id = person.id" in query.sql
+    check "person.id = ANY(project.userids)" in query.sql
+
 
 # ============================================================================
 # Extended Tests - get() error handling

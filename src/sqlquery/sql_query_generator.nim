@@ -388,7 +388,11 @@ proc parseJoin(joins: seq[JoinSpec], ignoreDeleteMarker: bool = false): tuple[jo
     var onList: seq[string] = @[]
     for on in join.on:
       let fieldPrimary = on.fieldPrimary
-      let fieldSecondary = on.fieldSecondary
+      var fieldSecondary = on.fieldSecondary
+      # Custom SQL: "sql:>" prefix bypasses validation and emits literal SQL (e.g. ANY(table.column)).
+      let customSqlSecondary = fieldSecondary.startsWith("sql:>")
+      if customSqlSecondary:
+        fieldSecondary = fieldSecondary.split("sql:>")[1]
 
       # PRIMARY FIELD
       if not validateFieldExists(fieldPrimary).valid:
@@ -400,8 +404,9 @@ proc parseJoin(joins: seq[JoinSpec], ignoreDeleteMarker: bool = false): tuple[jo
           sqlError("[JOIN PRIMARY] Field '" & fieldPrimary & "' does not exist in table '" & table & "' 2", on)
 
       # SECONDARY FIELD
+      # Skip validation when using sql:> raw SQL (e.g. ANY(project_users_groups.userids)).
       # Only if has a dot, otherwise could be a function or statement
-      if fieldSecondary.contains("."):
+      if not customSqlSecondary and fieldSecondary.contains("."):
         var pass: bool = false
 
         # Raw check
@@ -431,7 +436,7 @@ proc parseJoin(joins: seq[JoinSpec], ignoreDeleteMarker: bool = false): tuple[jo
       #     sqlError("[JOIN SECONDARY] Field '" & fieldSecondary & "' does not exist in table '" & table & "' 2", on)
 
       # All pass, include
-      if fieldSecondary.contains("."):
+      if customSqlSecondary or fieldSecondary.contains("."):
         onList.add(fieldPrimary & " " & on.symbol & " " & fieldSecondary)
       else:
         result.params.add(fieldSecondary)
@@ -750,7 +755,8 @@ macro selectQuery*(
 
               if secondaryField.kind == nnkStrLit:
                 let secondaryFieldStr = secondaryField.strVal
-                if secondaryFieldStr.contains("."):
+                # sql:> prefix = raw SQL in ON (e.g. ANY(project_users_groups.userids)); skip validation
+                if not secondaryFieldStr.startsWith("sql:>") and secondaryFieldStr.contains("."):
                   if not validateFieldExists(secondaryFieldStr).valid:
                     if hasAlias:
                       let split = secondaryFieldStr.split(".")

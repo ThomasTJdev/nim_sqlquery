@@ -226,6 +226,7 @@ When you need to escape the validation system, use the `sql:>` prefix:
 let query = selectQuery(
   table = "users",
   select = @["users.id", "users.name"],
+  joins = @[("projects", LEFTJOIN, @[("projects.user_id", "=", "sql:>ANY(users.ids)")])],
   where = @[
     ("sql:>users.status = 'active' OR users.creation > NOW() - INTERVAL '1 day'", "", ""),
     ("users.email", "IS NOT", "NULL"),
