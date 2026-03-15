@@ -796,6 +796,21 @@ suite "aggregate functions":
 
     check "avg(actions.estimatedtimeinhours) as avg_hours" in query.sql.toLowerAscii()
 
+  test "complex expression with literal and AS alias (e.g. percentile_cont)":
+    # Expression where first ( ) contains a literal (0.5), not a column; would previously
+    # trigger "column 0.5 does not exist". Validation is skipped for "expr AS alias" when expr contains "(".
+    let query = selectQuery(
+      table = "actions",
+      select = @[
+        "actions.id",
+        "percentile_cont(0.5) WITHIN GROUP (ORDER BY actions.date_end) / 3600.0 AS metric_value",
+      ],
+      where = @[("actions.project_id", "=", "123")]
+    )
+
+    check "percentile_cont(0.5)" in query.sql
+    check "metric_value" in query.sql.toLowerAscii()
+
   test "multiple aggregate functions":
     let query = selectQuery(
       table = "actions",

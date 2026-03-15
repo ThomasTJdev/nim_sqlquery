@@ -782,6 +782,8 @@ macro selectQuery*(
           var fieldStr = selectExpr.strVal.toLowerAscii()
           if fieldStr.contains("*"):
             continue
+          if fieldStr.contains(" as ") and fieldStr.contains("("):
+            continue
           if "." notin fieldStr and joins != nil:
             compileError("[selectQuery - SELECT] Field '" & `fieldStr` & "' is missing table name. Table names are required when using joins.")
 
