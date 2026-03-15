@@ -498,6 +498,37 @@ suite "ORDER BY extended":
 
     check query.sql == "SELECT actions.id FROM actions WHERE actions.id = ? AND actions.is_deleted IS NULL ORDER BY actions.name"
 
+  test "ORDER BY SELECT alias (e.g. COUNT(*) AS cnt, order by cnt DESC) 1":
+    let query = selectQuery(
+      table = "actions",
+      select = @["COUNT(*) AS cnt"],
+      where = @[("actions.project_id", "=", "123")],
+      order = @[("cnt", DESC)]
+    )
+    check query.sql == "SELECT count(*) as cnt FROM actions WHERE actions.project_id = ? AND actions.is_deleted IS NULL ORDER BY cnt DESC"
+    check query.params == @["123"]
+
+  test "ORDER BY SELECT alias (e.g. COUNT(*) AS cnt, order by cnt DESC) 2":
+    let query = selectQuery(
+      table = "actions",
+      select = @["actions.id", "COUNT(*) AS cnt"],
+      where = @[("actions.project_id", "=", "123")],
+      order = @[("cnt", DESC)]
+    )
+    check query.sql == "SELECT actions.id, count(*) as cnt FROM actions WHERE actions.project_id = ? AND actions.is_deleted IS NULL ORDER BY cnt DESC"
+    check query.params == @["123"]
+
+  test "ORDER BY SELECT alias (e.g. COUNT(*) AS cnt, order by cnt DESC) 3":
+    let s = @["actions.id", "COUNT(*) AS cnt"]
+    let query = selectQuery(
+      table = "actions",
+      select = s,
+      where = @[("actions.project_id", "=", "123")],
+      order = @[("cnt", DESC)]
+    )
+    check query.sql == "SELECT actions.id, count(*) as cnt FROM actions WHERE actions.project_id = ? AND actions.is_deleted IS NULL ORDER BY cnt DESC"
+    check query.params == @["123"]
+
 
 # ============================================================================
 # Extended Tests - WHERE Operators
@@ -594,6 +625,16 @@ suite "runtime functions extended":
     )
 
     check query.sql == "SELECT actions.id, actions.name FROM actions WHERE actions.project_id = ? AND actions.is_deleted IS NULL"
+    check query.params == @["123"]
+
+  test "selectQueryRuntime ORDER BY SELECT alias (e.g. cnt from COUNT(*) AS cnt)":
+    let query = selectQueryRuntime(
+      table = "actions",
+      select = @["COUNT(*) AS cnt"],
+      where = @[("actions.project_id", "=", "123")],
+      order = @[("cnt", DESC)]
+    )
+    check query.sql == "SELECT count(*) as cnt FROM actions WHERE actions.project_id = ? AND actions.is_deleted IS NULL ORDER BY cnt DESC"
     check query.params == @["123"]
 
   test "deleteQueryRuntime basic":

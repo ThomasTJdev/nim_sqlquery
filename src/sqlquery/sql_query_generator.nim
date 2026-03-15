@@ -132,14 +132,25 @@ proc parseTable(table: string): string =
   return table
 
 
-proc parseOrderBy(orderBy: seq[OrderSpec], table = ""): seq[string] =
+proc selectAliasesFromSelectList(select: seq[string]): seq[string] =
+  ## Extracts explicit SELECT aliases (e.g. "cnt" from "COUNT(*) AS cnt") for use in ORDER BY.
+  for item in select:
+    let lower = item.toLowerAscii()
+    if " as " in lower:
+      let parts = lower.split(" as ", 1)
+      if parts.len == 2:
+        result.add(parts[1].strip())
+
+proc parseOrderBy(orderBy: seq[OrderSpec], table = "", selectAliases: seq[string] = @[]): seq[string] =
   for order in orderBy:
-    var field = order.field
-    if "." notin field and table != "":
+    let rawField = order.field
+    let isSelectAlias = rawField.toLowerAscii() in selectAliases
+    var field = rawField
+    if not isSelectAlias and "." notin field and table != "":
       field = table & "." & field
 
     let direction = order.direction
-    if direction != QueryDirection.IGNORE:
+    if direction != QueryDirection.IGNORE and not isSelectAlias:
       let validation = validateFieldExists(field)
       if not validation.valid:
         sqlError("[ORDER BY] Field '" & validation.fieldName & "' does not exist in table '" & validation.tableName & "'", order)
@@ -343,6 +354,10 @@ proc parseSelect(select: seq[string], requireTableName = true, table = "", table
       if fieldStr.contains(" "):
         result.add(fieldLower)
         continue
+      # Inner content may be a literal (e.g. percentile_cont(0.5)) — skip validation if not a known field.
+      if not validateFieldExists(fieldStr).valid:
+        result.add(fieldLower)
+        continue
 
     if not requireTableName and "." notin fieldStr and table != "":
       if not validateFieldExists(fieldStr).valid and not validateFieldExists(table & "." & fieldStr).valid:
@@ -538,7 +553,8 @@ proc selectQueryRuntime*(
     whereParsed = parseWhere(where, requireTableName = false, table = tableParsed)
     groupByParsed = parseGroupBy(groupBy, table = tableParsed)
 
-  let orderParsed = parseOrderBy(order, table = tableParsed)
+  let orderSelectAliases = selectAliasesFromSelectList(select)
+  let orderParsed = parseOrderBy(order, table = tableParsed, selectAliases = orderSelectAliases)
   let limitParsed = parseLimit(limit)
   let offsetParsed = parseOffset(offset)
 
@@ -817,6 +833,18 @@ macro selectQuery*(
             else:
               compileError("[SELECT] Field '" & fieldStr & "' does not exist 2")
 
+  # Collect SELECT aliases (e.g. "cnt" from "COUNT(*) AS cnt") for ORDER BY validation
+  var selectAliases: seq[string] = @[]
+  if processedSelect != nil and processedSelect.kind == nnkPrefix and processedSelect[0].eqIdent("@"):
+    let bracketExpr = processedSelect[1]
+    if bracketExpr.kind == nnkBracket:
+      for selectExpr in bracketExpr:
+        if selectExpr.kind == nnkStrLit:
+          let item = selectExpr.strVal.toLowerAscii()
+          if " as " in item:
+            let parts = item.split(" as ", 1)
+            if parts.len == 2:
+              selectAliases.add(parts[1].strip())
 
   #
   # :== Validate WHERE clause fields
@@ -879,12 +907,17 @@ macro selectQuery*(
         if orderExpr.kind == nnkTupleConstr and orderExpr.len > 0:
           let fieldNode = orderExpr[0]
           if fieldNode.kind == nnkStrLit:
-            var fieldStr = fieldNode.strVal
+            let rawFieldStr = fieldNode.strVal
+            var fieldStr = rawFieldStr
             if "." notin fieldStr and joins == nil:
               fieldStr = table & "." & fieldStr
 
             if not validateFieldExists(fieldStr).valid:
-              compileError("[ORDER BY] Order by field '" & fieldStr & "' does not exist in table '" & table & "'")
+              # Allow ORDER BY on SELECT aliases (e.g. "cnt" from "COUNT(*) AS cnt").
+              # When select is a variable we cannot extract aliases at compile time (selectAliases empty);
+              # allow the field so runtime validation can accept it if it is an alias.
+              if selectAliases.len > 0 and rawFieldStr.toLowerAscii() notin selectAliases:
+                compileError("[ORDER BY] Order by field '" & fieldStr & "' does not exist in table '" & table & "'")
 
   elif order == nil:
     # Handle nil case - create empty order
