@@ -50,6 +50,22 @@ suite "selectQuery":
 
     check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project ON project.id = actions.project_id AND project.is_deleted IS NULL WHERE (where my day is good) AND actions.is_deleted IS NULL"
 
+  test "custom sql first condition preserves param for placeholder":
+    # When the first where condition uses sql:> with raw SQL containing ? (e.g. ANY(?::int[])),
+    # the value is still added to params so the placeholder can be bound.
+    let base = selectQuery(
+          table = "actions",
+          select = @["actions.id", "actions.name", "actions.status"],
+          joins = @[("project", LEFTJOIN, @[("project.id", "=", "actions.project_id")])],
+          where = @[
+            ("sql:>actions.project_id = ANY(?::int[])", "", "123,456"),
+            ("actions.status", "=", "pending"),
+          ],
+        )
+    check "actions.project_id = ANY(?::int[])" in base.sql
+    check "actions.status = ?" in base.sql
+    check base.params == @["123,456", "pending"]
+
   test "base":
     let base = selectQuery(
           table = "actions",

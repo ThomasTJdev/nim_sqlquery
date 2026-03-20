@@ -299,6 +299,9 @@ proc parseWhere(where: seq[WhereSpec], requireTableName = true, table = "", vali
 
     if skipRestValidation:
       statement = field
+      # Param may still be needed when raw SQL contains ? (e.g. <> ALL(?::int[])).
+      if value.len() > 0:
+        result.params.add(value)
     elif valueLower == "null":
       statement = field & " " & symbol & " NULL"
     elif valueLower in ["true", "false"] and symbol in ["IS", "IS NOT"]:
