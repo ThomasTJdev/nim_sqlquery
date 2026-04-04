@@ -492,28 +492,68 @@ macro validateColumns*(args: varargs[untyped]): untyped =
     return col in validColumns
 
   proc parseAndValidateFunction(funcStr: string): bool =
-    # Extract function name and arguments
+    # Extract function boundary and walk its content to find table.column references.
     let openParen = funcStr.find('(')
     let closeParen = funcStr.rfind(')')
     if openParen == -1 or closeParen == -1:
       return false
 
-    let args = funcStr[openParen + 1 .. closeParen - 1]
+    let fnContent = funcStr[openParen + 1 .. closeParen - 1]
 
-    # For each argument, validate if it's a column reference
-    for arg in args.split(','):
-      let cleanArg = arg.strip()
-      # Skip if it's a literal or special character
-      if cleanArg == "*" or cleanArg.contains("'") or cleanArg.contains("\""):
-        continue
-
-      # If it looks like a column reference, validate it
-      if cleanArg.contains('.'):
-        if not validateColumn(cleanArg):
-          error("Invalid column reference in function: " & cleanArg &
-                "\nAvailable columns are: " & $validColumns)
-                #lineInfoObj(funcStr))
+    proc isIdentifierToken(token: string): bool =
+      if token.len == 0:
+        return false
+      var hasAlphaOrUnderscore = false
+      for ch in token:
+        if ch == '_' or (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z'):
+          hasAlphaOrUnderscore = true
+        elif ch >= '0' and ch <= '9':
+          discard
+        else:
           return false
+      return hasAlphaOrUnderscore
+
+    proc extractColumnRefs(sqlExpr: string): seq[string] =
+      # Tokenize identifiers while skipping quoted string literals.
+      # Keep output in a local variable to avoid capturing `result` from nested logic.
+      var refs: seq[string] = @[]
+      var inSingleQuote = false
+      var inDoubleQuote = false
+      var token = ""
+
+      template flushToken() =
+        if token.len > 0:
+          if token.contains("."):
+            let parts = token.split(".")
+            if parts.len == 2 and isIdentifierToken(parts[0]) and isIdentifierToken(parts[1]):
+              refs.add(parts[0] & "." & parts[1])
+          token = ""
+
+      for ch in sqlExpr:
+        if ch == '\'' and not inDoubleQuote:
+          flushToken()
+          inSingleQuote = not inSingleQuote
+          continue
+        if ch == '"' and not inSingleQuote:
+          flushToken()
+          inDoubleQuote = not inDoubleQuote
+          continue
+        if inSingleQuote or inDoubleQuote:
+          continue
+
+        if ch == '_' or ch == '.' or (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9'):
+          token.add(ch)
+        else:
+          flushToken()
+
+      flushToken()
+      return refs
+
+    for columnRef in extractColumnRefs(fnContent):
+      if not validateColumn(columnRef):
+        error("Invalid column reference in function: " & columnRef &
+              "\nAvailable columns are: " & $validColumns)
+        return false
 
     return true
 

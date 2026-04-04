@@ -193,6 +193,44 @@ suite "selectQuery":
 
     check query.params == @["243", "1"]
 
+  test "grouped_where_or_inside_and":
+    let query = selectQuery(
+      table = "actions",
+      select = @["actions.id", "actions.name"],
+      where = whereAnd(@[
+        whereCond("actions.status", "=", "active"),
+        whereOr(@[
+          whereCond("actions.name", "=", "thomas"),
+          whereCond("actions.system", "=", "SYS")
+        ])
+      ])
+    )
+
+    check query.sql == "SELECT actions.id, actions.name FROM actions WHERE (actions.status = ? AND (actions.name = ? OR actions.system = ?)) AND actions.is_deleted IS NULL"
+    check query.params == @["active", "thomas", "SYS"]
+
+  test "grouped_where_nested_order_and_parentheses":
+    let query = selectQuery(
+      table = "actions",
+      select = @["actions.id"],
+      where = whereAnd(@[
+        whereOr(@[
+          whereCond("actions.status", "=", "active"),
+          whereCond("actions.status", "=", "pending")
+        ]),
+        whereOr(@[
+          whereCond("actions.system", "=", "SYS"),
+          whereAnd(@[
+            whereCond("actions.name", "LIKE", "%tom%"),
+            whereCond("actions.phase", ">", "2")
+          ])
+        ])
+      ])
+    )
+
+    check query.sql == "SELECT actions.id FROM actions WHERE ((actions.status = ? OR actions.status = ?) AND (actions.system = ? OR (actions.name LIKE ? AND actions.phase > ?))) AND actions.is_deleted IS NULL"
+    check query.params == @["active", "pending", "SYS", "%tom%", "2"]
+
   test "join with table alias RUNTIME":
     let query = selectQueryRuntime(
       table = "checklists",
@@ -316,6 +354,18 @@ suite "deleteQuery":
     check base.sql == "DELETE FROM project WHERE project.status = ? AND project.name LIKE ?"
     check base.params == @["active", "%test%"]
 
+  test "grouped_where_or":
+    let base = deleteQuery(
+      table = "actions",
+      where = whereOr(@[
+        whereCond("actions.id", "=", "123"),
+        whereCond("actions.project_id", "=", "456")
+      ])
+    )
+
+    check base.sql == "DELETE FROM actions WHERE (actions.id = ? OR actions.project_id = ?)"
+    check base.params == @["123", "456"]
+
 
 suite "updateQuery":
   test "base":
@@ -421,6 +471,19 @@ suite "updateQuery":
     check base.sql == "UPDATE actions SET name = ?, description = ? WHERE actions.id = ?"
     check base.params == @["updated", "new description", "123"]
 
+  test "grouped_where_or":
+    let base = updateQuery(
+      table = "actions",
+      data = @[("name", "changed")],
+      where = whereOr(@[
+        whereCond("actions.id", "=", "123"),
+        whereCond("actions.project_id", "=", "456")
+      ])
+    )
+
+    check base.sql == "UPDATE actions SET name = ? WHERE (actions.id = ? OR actions.project_id = ?)"
+    check base.params == @["changed", "123", "456"]
+
 
 suite "insertQuery":
   test "base":
@@ -485,6 +548,32 @@ suite "compile time errors":
       table = "actions",
       select = @["actions.id", "actions.name", "actions.status"],
       where = @[("actions.status", "= ANY(::int[])", "1,2,3")]
+    ))
+
+  test "invalid field in nested grouped where":
+    check not compiles(selectQuery(
+      table = "actions",
+      select = @["actions.id"],
+      where = whereOr(@[
+        whereCond("actions.idd", "=", "1"),
+        whereCond("actions.id", "=", "2")
+      ])
+    ))
+
+  test "invalid symbol in nested grouped where":
+    check not compiles(selectQuery(
+      table = "actions",
+      select = @["actions.id"],
+      where = whereAnd(@[
+        whereCond("actions.id", "BAD", "1")
+      ])
+    ))
+
+  test "empty grouped where is rejected":
+    check not compiles(selectQuery(
+      table = "actions",
+      select = @["actions.id"],
+      where = whereOr(@[])
     ))
 
 
@@ -626,6 +715,16 @@ suite "WHERE operators extended":
     check "api_requests.status_code NOT BETWEEN ? AND ?" in query.sql
     check "api_requests.method = ?" in query.sql
     check query.params == @["GET", "200", "299"]
+
+  test "where with double functions":
+    let query = selectQueryRuntime(
+      table = "actions",
+      select = @["actions.id", "actions.name"],
+      where = @[("actions.project_id", "=", "123"), ("LOWER(COALESCE(actions.name, ''))", "=", "test")]
+    )
+
+    check query.sql == "SELECT actions.id, actions.name FROM actions WHERE actions.project_id = ? AND LOWER(COALESCE(actions.name, '')) = ? AND actions.is_deleted IS NULL"
+    check query.params == @["123", "test"]
 
 
 # ============================================================================

@@ -42,6 +42,18 @@ type
 type
   JoinSpec* = tuple[table: string, joinType: QueryJoinType, on: seq[tuple[fieldPrimary: string, symbol: string, fieldSecondary: string]]]
   WhereSpec* = tuple[field: string, symbol: string, value: string]
+  WhereLogic* = enum
+    WAND, WOR
+  WhereNodeKind* = enum
+    LEAF, GROUP
+  WhereLeafSpec* = tuple[field: string, symbol: string, value: string]
+  WhereNode* = object
+    case kind*: WhereNodeKind
+    of LEAF:
+      leaf*: WhereLeafSpec
+    of GROUP:
+      logic*: WhereLogic
+      nodes*: seq[WhereNode]
   WhereStringSpec* = tuple[where: string, params: seq[string]]
   OrderSpec* = tuple[field: string, direction: QueryDirection]
   UpdateSpec* = tuple[field: string, value: string]
@@ -53,6 +65,18 @@ type
 
 
 var pg*: PostgresPool
+
+func whereCond*(field, symbol, value: string): WhereNode =
+  ## Builds a single WHERE condition node.
+  result = WhereNode(kind: LEAF, leaf: (field: field, symbol: symbol, value: value))
+
+func whereAnd*(nodes: seq[WhereNode]): WhereNode =
+  ## Builds a grouped WHERE node that joins children with AND.
+  result = WhereNode(kind: GROUP, logic: WAND, nodes: nodes)
+
+func whereOr*(nodes: seq[WhereNode]): WhereNode =
+  ## Builds a grouped WHERE node that joins children with OR.
+  result = WhereNode(kind: GROUP, logic: WOR, nodes: nodes)
 
 proc logError(message: string) =
   echo "\e[31mError:\e[0m " & message
@@ -209,37 +233,180 @@ proc parseOffset(offset: int): int =
     sqlError("Offset cannot be negative", offset)
   return offset
 
+const WhereSymbolList = ["=", "!=", ">", "<", ">=", "<=", "<>", "IN", "NOT IN", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE", "IS", "IS NOT", "BETWEEN", "NOT BETWEEN"]
 
-proc parseWhere(where: seq[WhereSpec], requireTableName = true, table = "", validateSchema = true): tuple[where: seq[string], params: seq[string]] =
-  const symbolList = ["=", "!=", ">", "<", ">=", "<=", "<>", "IN", "NOT IN", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE", "IS", "IS NOT", "BETWEEN", "NOT BETWEEN"]
+proc compileValidateWhereSymbol(symbolStr: string) =
+  if symbolStr.startsWith("= ANY(::") or symbolStr.startsWith("<> ALL(::"):
+    compileError("= ANY(::) or <> ALL(::) is not supported. Use = ANY(?::type[]) or <> ALL(?::type[]) instead")
+  if symbolStr.len > 0 and symbolStr notin WhereSymbolList and not symbolStr.startsWith("= ANY(?") and not symbolStr.startsWith("<> ALL(?"):
+    if symbolStr == "IN" or symbolStr == "NOT IN":
+      compileError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) or <> ALL(?::type[]) instead")
+    compileError("Invalid symbol: " & symbolStr & ". Allowed symbols: " & WhereSymbolList.join(", "))
 
-  var allTables: seq[string] = @[]
-  for i in 0..<where.len:
-    let condition = where[i]
-    var field = condition[0]
-    if field == "project_id" and i > 0:
-      sqlWarning("project_id within a where statement will in 99% of cases be the first condition. That's our indexes!")
+proc compileValidateWhereField(
+  fieldRaw: string,
+  baseTable: string,
+  requireTableName: bool,
+  allowCrossTable: bool,
+  contextPrefix: string
+) =
+  var fieldStr = fieldRaw
+  if fieldStr.startsWith("sql:>"):
+    return
 
-    let symbol = condition[1]
-    let value = condition[2]
-    let customSQL = field.startsWith("sql:>")
-    var skipRestValidation = false
+  # Allow PostgreSQL functions in where clause similarly to runtime parser.
+  if "(" in fieldStr:
+    let s1 = fieldStr.split("(")[1]
+    let s2 = s1.split(")")[0]
+    if s2.contains(" "):
+      return
+    fieldStr = s2
 
-    if symbol.len() == 0 and value.len() == 0 and not customSQL:
-      # We cant skip on customSQL, since we have to remove the sql:> prefix.
-      skipRestValidation = true
+  if "." notin fieldStr:
+    if requireTableName:
+      compileError(contextPrefix & " Where field '" & fieldStr & "' is missing table name.")
+    elif baseTable.len > 0:
+      fieldStr = baseTable & "." & fieldStr
 
-    #
-    # Validation
-    #
-    if skipRestValidation:
+  if not validateFieldExists(fieldStr).valid:
+    compileError(contextPrefix & " Where field '" & fieldStr & "' does not exist")
+
+  if not allowCrossTable:
+    let parts = fieldStr.split(".")
+    if parts.len == 2 and parts[0] != baseTable:
+      compileError(contextPrefix & " Where field '" & fieldStr & "' does not exist in table '" & baseTable & "'")
+
+proc compileValidateWhereAst(
+  whereExpr: NimNode,
+  baseTable: string,
+  requireTableName: bool,
+  allowCrossTable: bool,
+  contextPrefix: string
+) =
+  case whereExpr.kind
+  of nnkPrefix:
+    if whereExpr.len >= 2 and whereExpr[0].eqIdent("@"):
+      let bracketExpr = whereExpr[1]
+      if bracketExpr.kind == nnkBracket:
+        for child in bracketExpr:
+          compileValidateWhereAst(child, baseTable, requireTableName, allowCrossTable, contextPrefix)
+  of nnkBracket:
+    for child in whereExpr:
+      compileValidateWhereAst(child, baseTable, requireTableName, allowCrossTable, contextPrefix)
+  of nnkTupleConstr:
+    if whereExpr.len >= 1 and whereExpr[0].kind == nnkStrLit:
+      compileValidateWhereField(whereExpr[0].strVal, baseTable, requireTableName, allowCrossTable, contextPrefix)
+    if whereExpr.len >= 2 and whereExpr[1].kind == nnkStrLit:
+      compileValidateWhereSymbol(whereExpr[1].strVal)
+  of nnkCall, nnkCommand:
+    let callee = whereExpr[0]
+    if callee.eqIdent("whereCond"):
+      if whereExpr.len >= 3 and whereExpr[1].kind == nnkStrLit:
+        compileValidateWhereField(whereExpr[1].strVal, baseTable, requireTableName, allowCrossTable, contextPrefix)
+      if whereExpr.len >= 4 and whereExpr[2].kind == nnkStrLit:
+        compileValidateWhereSymbol(whereExpr[2].strVal)
+    elif callee.eqIdent("whereAnd") or callee.eqIdent("whereOr"):
+      if whereExpr.len < 2:
+        compileError(contextPrefix & " Grouped where call requires child nodes.")
+      let groupArg = whereExpr[1]
+      var childCount = 0
+      if groupArg.kind == nnkPrefix and groupArg.len >= 2 and groupArg[0].eqIdent("@") and groupArg[1].kind == nnkBracket:
+        for child in groupArg[1]:
+          inc childCount
+          compileValidateWhereAst(child, baseTable, requireTableName, allowCrossTable, contextPrefix)
+      elif groupArg.kind == nnkBracket:
+        for child in groupArg:
+          inc childCount
+          compileValidateWhereAst(child, baseTable, requireTableName, allowCrossTable, contextPrefix)
+      if childCount == 0:
+        compileError(contextPrefix & " Empty where groups are not allowed.")
+  else:
+    discard
+
+proc isIdentifierToken(token: string): bool =
+  ## Accept letters, numbers and underscore in SQL identifiers.
+  if token.len == 0:
+    return false
+  var hasAlphaOrUnderscore = false
+  for ch in token:
+    if ch == '_' or (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z'):
+      hasAlphaOrUnderscore = true
+    elif ch >= '0' and ch <= '9':
       discard
+    else:
+      return false
+  return hasAlphaOrUnderscore
 
-    elif validateSchema and not customSQL:
-      var fieldStr = field
-      # Allow to use PostgreSQL functions in where clause, like:
-      # ("length(description)", "<>", $templateData[2].len())
-      if "(" in fieldStr:
+proc extractColumnRefs(sqlExpr: string): seq[string] =
+  ## Extract dotted table.column references while skipping quoted literals.
+  var refs: seq[string] = @[]
+  var inSingleQuote = false
+  var inDoubleQuote = false
+  var token = ""
+
+  template flushToken() =
+    if token.len > 0:
+      if token.contains("."):
+        let parts = token.split(".")
+        if parts.len == 2 and isIdentifierToken(parts[0]) and isIdentifierToken(parts[1]):
+          refs.add(parts[0] & "." & parts[1])
+      token = ""
+
+  for ch in sqlExpr:
+    if ch == '\'' and not inDoubleQuote:
+      flushToken()
+      inSingleQuote = not inSingleQuote
+      continue
+    if ch == '"' and not inSingleQuote:
+      flushToken()
+      inDoubleQuote = not inDoubleQuote
+      continue
+    if inSingleQuote or inDoubleQuote:
+      continue
+
+    if ch == '_' or ch == '.' or (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9'):
+      token.add(ch)
+    else:
+      flushToken()
+
+  flushToken()
+  return refs
+
+proc parseWhereCondition(condition: WhereSpec, conditionIndex: int, requireTableName = true, table = "", validateSchema = true): tuple[statement: string, params: seq[string]] =
+  var field = condition[0]
+  if field == "project_id" and conditionIndex > 0:
+    sqlWarning("project_id within a where statement will in 99% of cases be the first condition. That's our indexes!")
+
+  let symbol = condition[1]
+  let value = condition[2]
+  let customSQL = field.startsWith("sql:>")
+  var skipRestValidation = false
+
+  if symbol.len() == 0 and value.len() == 0 and not customSQL:
+    # We cant skip on customSQL, since we have to remove the sql:> prefix.
+    skipRestValidation = true
+
+  #
+  # Validation
+  #
+  if skipRestValidation:
+    discard
+
+  elif validateSchema and not customSQL:
+    var fieldStr = field
+    var validatedFunctionRefs = false
+
+    # Allow to use PostgreSQL functions in where clause, like:
+    # ("length(description)", "<>", $templateData[2].len())
+    if "(" in fieldStr:
+      let columnRefs = extractColumnRefs(fieldStr)
+      if columnRefs.len > 0:
+        validatedFunctionRefs = true
+        for columnRef in columnRefs:
+          let validation = validateFieldExists(columnRef)
+          if not validation.valid:
+            sqlError("[WHERE] Field '" & columnRef & "' does not exist in table '" & validation.tableName & "'", condition)
+      else:
         let s1 = fieldStr.split("(")[1]
         let s2 = s1.split(")")[0]
         # If there's spaces in the function, we skip the rest of the validation
@@ -252,82 +419,107 @@ proc parseWhere(where: seq[WhereSpec], requireTableName = true, table = "", vali
         else:
           fieldStr = s2
 
-      # Allow to skip
-      if not skipRestValidation:
-        # Combine field with table name if needed
-        if not requireTableName and "." notin fieldStr and table != "":
-          fieldStr = table & "." & fieldStr
+    # Allow to skip
+    if not skipRestValidation and not validatedFunctionRefs:
+      # Combine field with table name if needed
+      if not requireTableName and "." notin fieldStr and table != "":
+        fieldStr = table & "." & fieldStr
 
-        # Validate the field
-        let validation = validateFieldExists(fieldStr)
-        if not validation.valid:
-          sqlError("[WHERE] Field '" & fieldStr & "' does not exist in table '" & validation.tableName & "'", condition)
+      # Validate the field
+      let validation = validateFieldExists(fieldStr)
+      if not validation.valid:
+        sqlError("[WHERE] Field '" & fieldStr & "' does not exist in table '" & validation.tableName & "'", condition)
 
-        if symbol notin symbolList and not symbol.startsWith("= ANY(?") and not symbol.startsWith("<> ALL(?"):
-          if symbol == "IN" or symbol == "NOT IN":
-            sqlError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) or <> ALL(?::type[]) instead", condition)
-          sqlError("Invalid symbol: " & symbol, "Allowed symbols: " & symbolList.join(", "), condition)
+    if not skipRestValidation:
+      if symbol notin WhereSymbolList and not symbol.startsWith("= ANY(?") and not symbol.startsWith("<> ALL(?"):
+        if symbol == "IN" or symbol == "NOT IN":
+          sqlError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) or <> ALL(?::type[]) instead", condition)
+        sqlError("Invalid symbol: " & symbol, "Allowed symbols: " & WhereSymbolList.join(", "), condition)
 
-        allTables.add(validation.tableName)
+  # Custom SQL ignores all rules and lets you use any SQL you want. Just
+  # prepend the field with "sql:>" and it will be ignored by the parser.
+  #
+  # Example:
+  # ("sql:>project_id = ANY({1,2,3})", "", "")
+  #
+  # This will be treated as a custom SQL statement.
+  # That's useful for when you need to use a custom SQL statement that is
+  # not supported by the parser.
+  elif customSQL:
+    field = field.split("sql:>")[1]
 
-    # Custom SQL ignores all rules and lets you use any SQL you want. Just
-    # prepend the field with "sql:>" and it will be ignored by the parser.
-    #
-    # Example:
-    # ("sql:>project_id = ANY({1,2,3})", "", "")
-    #
-    # This will be treated as a custom SQL statement.
-    # That's useful for when you need to use a custom SQL statement that is
-    # not supported by the parser.
-    elif customSQL:
-      field = field.split("sql:>")[1]
+  #
+  # Start to format
+  #
+  let valueLower = value.toLowerAscii()
+  var statement: string
+  var params: seq[string] = @[]
 
-    # Manual skip validation
-    else:
-      if table.len() > 0:
-        allTables.add(table)
-      else:
-        let splitField = field.split(".")
-        if splitField.len() == 2:
-          allTables.add(splitField[0])
+  if skipRestValidation:
+    statement = field
+    # Param may still be needed when raw SQL contains ? (e.g. <> ALL(?::int[])).
+    if value.len() > 0:
+      params.add(value)
+  elif valueLower == "null":
+    statement = field & " " & symbol & " NULL"
+  elif valueLower in ["true", "false"] and symbol in ["IS", "IS NOT"]:
+    statement = field & " " & symbol & " " & value
+  elif symbol.startsWith("= ANY(?") or symbol.startsWith("<> ALL(?"):
+    statement = field & " " & symbol
+    params.add("{" & value & "}")
+  elif value.contains("?"):
+    statement = field & " " & symbol & " ?"
+    params.add(value)
+  elif customSQL and symbol.len() == 0 and value.len() == 0:
+    statement = field
+  elif customSQL and symbol.len() == 0:
+    statement = field
+    params.add(value)
+  else:
+    statement = field & " " & symbol & " ?"
+    params.add(value)
 
-    #
-    # Start to format
-    #
-    let valueLower = value.toLowerAscii()
-    var statement: string
+  # Custom SQL will always be wrapped in parentheses
+  if customSQL:
+    result.statement = "(" & statement & ")"
+  else:
+    result.statement = statement
+  result.params = params
 
-    if skipRestValidation:
-      statement = field
-      # Param may still be needed when raw SQL contains ? (e.g. <> ALL(?::int[])).
-      if value.len() > 0:
-        result.params.add(value)
-    elif valueLower == "null":
-      statement = field & " " & symbol & " NULL"
-    elif valueLower in ["true", "false"] and symbol in ["IS", "IS NOT"]:
-      statement = field & " " & symbol & " " & value
-    elif symbol.startsWith("= ANY(?") or symbol.startsWith("<> ALL(?"):
-      statement = field & " " & symbol
-      result.params.add("{" & value & "}")
-    elif value.contains("?"):
-      statement = field & " " & symbol & " ?"
-      result.params.add(value)
-    elif customSQL and symbol.len() == 0 and value.len() == 0:
-      statement = field
-    elif customSQL and symbol.len() == 0:
-      statement = field
-      result.params.add(value)
-    else:
-      statement = field & " " & symbol & " ?"
-      result.params.add(value)
+proc parseWhereNode(node: WhereNode, requireTableName = true, table = "", validateSchema = true): tuple[statement: string, params: seq[string]] =
+  case node.kind
+  of LEAF:
+    return parseWhereCondition(node.leaf, conditionIndex = 0, requireTableName = requireTableName, table = table, validateSchema = validateSchema)
+  of GROUP:
+    if node.nodes.len == 0:
+      sqlError("Where group cannot be empty")
+      return ("", @[])
 
-    # Custom SQL will always be wrapped in parentheses
-    if customSQL:
-      result.where.add("(" & statement & ")")
-    else:
-      result.where.add(statement)
+    let groupJoin = if node.logic == WAND: " AND " else: " OR "
+    var groupStatements: seq[string] = @[]
+    var params: seq[string] = @[]
+    for child in node.nodes:
+      let parsedChild = parseWhereNode(child, requireTableName = requireTableName, table = table, validateSchema = validateSchema)
+      if parsedChild.statement.len > 0:
+        groupStatements.add(parsedChild.statement)
+      params.add(parsedChild.params)
+    result.statement = "(" & groupStatements.join(groupJoin) & ")"
+    result.params = params
+
+proc parseWhere(where: seq[WhereSpec], requireTableName = true, table = "", validateSchema = true): tuple[where: seq[string], params: seq[string]] =
+  for i, condition in where:
+    let parsedCondition = parseWhereCondition(condition, conditionIndex = i, requireTableName = requireTableName, table = table, validateSchema = validateSchema)
+    if parsedCondition.statement.len > 0:
+      result.where.add(parsedCondition.statement)
+    result.params.add(parsedCondition.params)
 
   return result
+
+proc parseWhere(where: WhereNode, requireTableName = true, table = "", validateSchema = true): tuple[where: seq[string], params: seq[string]] =
+  let parsedNode = parseWhereNode(where, requireTableName = requireTableName, table = table, validateSchema = validateSchema)
+  if parsedNode.statement.len > 0:
+    result.where.add(parsedNode.statement)
+  result.params = parsedNode.params
 
 
 proc parseSelect(select: seq[string], requireTableName = true, table = "", tableAsNames: seq[string] = @[]): seq[string] =
@@ -611,10 +803,108 @@ proc selectQueryRuntime*(
 
   return QueryResultSelect(select: selectParsed, sql: queryParts.join(" "), params: queryParams)
 
+proc selectQueryRuntime*(
+  table: string,
+  select: seq[string],
+  where: WhereNode,
+  joins: seq[JoinSpec] = @[],
+  whereString: WhereStringSpec = (where: "", params: @[]),
+  order: seq[OrderSpec] = @[],
+  limit: int = 0,
+  offset: int = 0,
+  groupBy: seq[string] = @[],
+  ignoreDeleteMarker: bool = false
+): QueryResultSelect =
+  let tableParsed = parseTable(table)
+  let joinsParsed = parseJoin(joins, ignoreDeleteMarker)
+
+  var selectParsed: seq[string]
+  var whereParsed: tuple[where: seq[string], params: seq[string]]
+  var groupByParsed: seq[string]
+  if joinsParsed.joins.len > 0:
+    selectParsed = parseSelect(select, tableAsNames = joinsParsed.tableNames)
+    whereParsed = parseWhere(where)
+    groupByParsed = parseGroupBy(groupBy, table = tableParsed, tableNamesReal = joinsParsed.tableNamesReal)
+  else:
+    selectParsed = parseSelect(select, requireTableName = false, table = tableParsed)
+    whereParsed = parseWhere(where, requireTableName = false, table = tableParsed)
+    groupByParsed = parseGroupBy(groupBy, table = tableParsed)
+
+  let orderSelectAliases = selectAliasesFromSelectList(select)
+  let orderParsed = parseOrderBy(order, table = tableParsed, selectAliases = orderSelectAliases)
+  let limitParsed = parseLimit(limit)
+  let offsetParsed = parseOffset(offset)
+
+  if selectParsed.len == 0:
+    sqlError("Select cannot be empty")
+
+  if whereParsed.where.len == 0:
+    sqlError("Where cannot be empty")
+
+  var queryParts: seq[string] = @[]
+  var queryParams: seq[string] = @[]
+  queryParts.add("SELECT " & selectParsed.join(", "))
+  queryParts.add("FROM " & tableParsed)
+
+  if joinsParsed.joins.len > 0:
+    queryParts.add(joinsParsed.joins.join(" "))
+    queryParams.add(joinsParsed.params)
+
+  if whereParsed.where.len > 0:
+    queryParts.add("WHERE " & whereParsed.where.join(" AND "))
+    queryParams.add(whereParsed.params)
+
+  if whereString.where != "" and whereString.params.len == whereString.where.count("?"):
+    if whereParsed.where.len > 0:
+      if whereString.where.toLowerAscii().strip().startsWith("and "):
+        queryParts.add(whereString.where)
+      else:
+        queryParts.add("AND " & whereString.where)
+
+    else:
+      queryParts.add("WHERE " & whereString.where)
+    queryParams.add(whereString.params)
+
+  if tableParsed in hasDeleteMarkerFields and not ignoreDeleteMarker:
+    if whereParsed.where.len > 0:
+      queryParts.add("AND " & tableParsed & ".is_deleted IS NULL")
+    else:
+      queryParts.add("WHERE " & tableParsed & ".is_deleted IS NULL")
+
+  if groupByParsed.len > 0:
+    queryParts.add("GROUP BY " & groupByParsed.join(", "))
+
+  if orderParsed.len > 0:
+    queryParts.add("ORDER BY " & orderParsed.join(", "))
+
+  if limitParsed > 0:
+    queryParts.add("LIMIT " & $limitParsed)
+
+  if offsetParsed > 0:
+    queryParts.add("OFFSET " & $offsetParsed)
+
+  return QueryResultSelect(select: selectParsed, sql: queryParts.join(" "), params: queryParams)
+
 
 proc deleteQueryRuntime*(
   table: string,
   where: seq[WhereSpec]
+): QueryResult =
+  let table = parseTable(table)
+  let where = parseWhere(where, requireTableName = false, table = table)
+
+  if where.where.len == 0:
+    sqlError("Where cannot be empty")
+
+  var queryParts: seq[string] = @[]
+  queryParts.add("DELETE FROM " & table)
+  if where.where.len > 0:
+    queryParts.add("WHERE " & where.where.join(" AND "))
+  return QueryResult(sql: queryParts.join(" "), params: where.params)
+
+proc deleteQueryRuntime*(
+  table: string,
+  where: WhereNode
 ): QueryResult =
   let table = parseTable(table)
   let where = parseWhere(where, requireTableName = false, table = table)
@@ -633,6 +923,32 @@ proc updateQueryRuntime*(
   table: string,
   data: seq[UpdateSpec],
   where: seq[WhereSpec]
+): QueryResult =
+  let table = parseTable(table)
+  let data = parseSetData(table, data)
+  let where = parseWhere(where, requireTableName = false, table = table)
+
+  if data.data.len == 0:
+    sqlError("Data cannot be empty")
+  if where.where.len == 0:
+    sqlError("Where cannot be empty")
+
+  var queryParts: seq[string] = @[]
+  var queryParams: seq[string] = @[]
+  queryParts.add("UPDATE " & table)
+  queryParts.add("SET " & data.data.join(", "))
+  queryParams.add(data.params)
+
+  if where.where.len > 0:
+    queryParts.add("WHERE " & where.where.join(" AND "))
+    queryParams.add(where.params)
+
+  return QueryResult(sql: queryParts.join(" "), params: queryParams)
+
+proc updateQueryRuntime*(
+  table: string,
+  data: seq[UpdateSpec],
+  where: WhereNode
 ): QueryResult =
   let table = parseTable(table)
   let data = parseSetData(table, data)
@@ -854,46 +1170,15 @@ macro selectQuery*(
   #
   var processedWhere = where
 
-  if where != nil and where.kind == nnkPrefix and where[0].eqIdent("@"):
-    let bracketExpr = where[1]
-    if bracketExpr.kind == nnkBracket:
-      for whereExpr in bracketExpr:
-        if whereExpr.kind == nnkTupleConstr and whereExpr.len > 0:
-          let fieldNode = whereExpr[0]
-          if fieldNode.kind == nnkStrLit:
-            var fieldStr = fieldNode.strVal
-            let customSQL = fieldStr.startsWith("sql:>")
-            if customSQL:
-              continue
-
-            # Allow to use PostgreSQL functions in where clause, like:
-            # ("length(description)", "<>", $templateData[2].len())
-            if "(" in fieldStr:
-              let s1 = fieldStr.split("(")[1]
-              let s2 = s1.split(")")[0]
-              if s2.contains(" "):
-                continue
-              else:
-                fieldStr = s2
-
-            if "." notin fieldStr:
-              if joins != nil:
-                compileError("[selectQuery - WHERE] Where field '" & fieldStr & "' is missing table name. Table names are required when using joins.")
-              else:
-                fieldStr = table & "." & fieldStr
-
-            if not validateFieldExists(fieldStr).valid:
-              compileError("[WHERE] Where field '" & fieldStr & "' does not exist")
-
-          # Some specific scenarios we know will fail, but we support
-          # something close to it.
-          let symbolNode = whereExpr[1]
-          if symbolNode.kind == nnkStrLit:
-            let symbolStr = symbolNode.strVal
-            if symbolStr.startsWith("= ANY(::") or symbolStr.startsWith("<> ALL(::") :
-              error("= ANY(::) or <> ALL(::) is not supported. Use = ANY(?::type[]) or <> ALL(?::type[]) instead")
-
-  elif where == nil:
+  if where != nil:
+    compileValidateWhereAst(
+      whereExpr = where,
+      baseTable = table,
+      requireTableName = joins != nil,
+      allowCrossTable = true,
+      contextPrefix = "[selectQuery - WHERE]"
+    )
+  else:
     # Handle nil case - create empty where
     compileError("Where cannot be empty")
     #processedWhere = newCall("@", newNimNode(nnkBracket))
@@ -989,28 +1274,15 @@ macro deleteQuery*(
   #
   var processedWhere = where
 
-  if where != nil and where.kind == nnkPrefix and where[0].eqIdent("@"):
-    # Handle @[...] syntax
-    let bracketExpr = where[1]
-    if bracketExpr.kind == nnkBracket:
-      for whereExpr in bracketExpr:
-        if whereExpr.kind == nnkTupleConstr and whereExpr.len > 0:
-          let fieldNode = whereExpr[0]
-          if fieldNode.kind == nnkStrLit:
-            var fieldStr = fieldNode.strVal
-
-            if "." notin fieldStr:
-              fieldStr = table & "." & fieldStr
-
-            let parts = fieldStr.split(".")
-            let fieldTable = parts[0]
-
-            if not validateFieldExists(fieldStr).valid:
-              compileError("[deleteQuery - WHERE] Where field '" & fieldStr & "' does not exist. Table: " & table & ".")
-            if fieldTable != table:
-              compileError("[deleteQuery - WHERE] Where field '" & fieldStr & "' does not exist in table '" & fieldTable & "'")
-
-  elif where == nil:
+  if where != nil:
+    compileValidateWhereAst(
+      whereExpr = where,
+      baseTable = table,
+      requireTableName = false,
+      allowCrossTable = false,
+      contextPrefix = "[deleteQuery - WHERE]"
+    )
+  else:
     # Handle nil case - create empty where
     compileError("Where cannot be empty")
 
@@ -1070,39 +1342,15 @@ macro updateQuery*(
 
   # Update does not have joins (unless you wants to be screwed), so we allow
   # skipping table name in where clause
-  if where != nil and where.kind == nnkPrefix and where[0].eqIdent("@"):
-    # Handle @[...] syntax
-    let bracketExpr = where[1]
-    if bracketExpr.kind == nnkBracket:
-      for whereExpr in bracketExpr:
-        if whereExpr.kind == nnkTupleConstr and whereExpr.len > 0:
-          let fieldNode = whereExpr[0]
-          if fieldNode.kind == nnkStrLit:
-            var fieldStr = fieldNode.strVal
-            let customSQL = fieldStr.startsWith("sql:>")
-            if customSQL:
-              continue
-
-            # Allow to use PostgreSQL functions in where clause, like:
-            # ("length(description)", "<>", $templateData[2].len())
-            if "(" in fieldStr:
-              let s1 = fieldStr.split("(")[1]
-              let s2 = s1.split(")")[0]
-              fieldStr = s2
-              if fieldStr.contains(" "):
-                continue
-
-            if "." notin fieldStr:
-              fieldStr = table & "." & fieldStr
-
-            let parts = fieldStr.split(".")
-            let fieldTable = parts[0]
-
-            if not validateFieldExists(fieldStr).valid:
-              compileError("[updateQuery - WHERE] Where field '" & fieldStr & "' does not exist. Table: " & table & ".")
-            if fieldTable != table:
-              compileError("[updateQuery - WHERE] Where field '" & fieldStr & "' does not exist in table '" & fieldTable & "'")
-  elif where == nil:
+  if where != nil:
+    compileValidateWhereAst(
+      whereExpr = where,
+      baseTable = table,
+      requireTableName = false,
+      allowCrossTable = false,
+      contextPrefix = "[updateQuery - WHERE]"
+    )
+  else:
     # Handle nil case - create empty where
     compileError("Where cannot be empty")
 
@@ -1416,6 +1664,47 @@ proc selectRowsRuntime*(
     logError(e.msg)
     return
 
+proc selectRowsRuntime*(
+  table: string,
+  select: seq[string],
+  where: WhereNode,
+  joins: seq[JoinSpec] = @[],
+  whereString: WhereStringSpec = (where: "", params: @[]),
+  order: seq[OrderSpec] = @[],
+  limit: int = 0,
+  offset: int = 0,
+  groupBy: seq[string] = @[],
+  ignoreDeleteMarker: bool = false,
+  debugPrintQuery: bool = false,
+  db: DbConn = nil
+): RowsSelectionData =
+  var query: QueryResultSelect
+  try:
+    query = selectQueryRuntime(table = table, select = select, where = where, joins = joins, whereString = whereString, order = order, limit = limit, offset = offset, groupBy = groupBy, ignoreDeleteMarker = ignoreDeleteMarker)
+    when defined(dev):
+      if debugPrintQuery:
+        echo query.sql
+        echo query.params
+
+    if db != nil:
+      result.table = table
+      result.selected = query.select
+      result.rows = getAllRows(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result.table = table
+        result.selected = query.select
+        result.rows = getAllRows(conn, sql(query.sql), query.params)
+  except SqlValidationError as e:
+    logError(e.msg)
+    return
+  except SqlQueryWarning as e:
+    logError(e.msg)
+    return
+  except DbError as e:
+    logError(e.msg)
+    return
+
 
 proc selectValueRuntime*(
   table: string,
@@ -1432,6 +1721,41 @@ proc selectValueRuntime*(
   var query: QueryResultSelect
   try:
     query = selectQueryRuntime(table = table, select = @[select], joins = joins, where = where, whereString = whereString, order = order, limit = limit, offset = offset)
+    when defined(dev):
+      if debugPrintQuery:
+        echo query.sql
+        echo query.params
+
+    if db != nil:
+      result = getValue(db, sql(query.sql), query.params)
+    else:
+      pg.withconnection conn:
+        result = getValue(conn, sql(query.sql), query.params)
+  except SqlValidationError as e:
+    logError(e.msg)
+    return
+  except SqlQueryWarning as e:
+    logError(e.msg)
+    return
+  except DbError as e:
+    logError(e.msg)
+    return
+
+proc selectValueRuntime*(
+  table: string,
+  select: string,
+  where: WhereNode,
+  joins: seq[JoinSpec] = @[],
+  whereString: WhereStringSpec = (where: "", params: @[]),
+  order: seq[OrderSpec] = @[],
+  limit: int = 0,
+  offset: int = 0,
+  debugPrintQuery: bool = false,
+  db: DbConn = nil
+): string =
+  var query: QueryResultSelect
+  try:
+    query = selectQueryRuntime(table = table, select = @[select], where = where, joins = joins, whereString = whereString, order = order, limit = limit, offset = offset)
     when defined(dev):
       if debugPrintQuery:
         echo query.sql

@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS actions (
   description TEXT,
   status VARCHAR(50),
   project_id INTEGER,
+  system TEXT,
   phase VARCHAR(50),
   date_end TIMESTAMP,
   estimatedtimeinhours DECIMAL(10, 2),

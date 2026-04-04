@@ -267,6 +267,63 @@ let query = selectQuery(
 )
 ```
 
+### Nested WHERE Groups (Compile-Time Safe)
+
+Use `whereCond`, `whereAnd`, and `whereOr` when you need explicit parenthesized logic.
+
+- Default/simple path: `where = @[("table.field", "=", "value"), ...]` (joined with `AND`)
+- Advanced/nested path: grouped nodes with `whereAnd` / `whereOr`
+
+Keep using `@[WhereSpec]` as your standard approach. Use grouped nodes only for detailed boolean logic.
+
+```nim
+let query = selectQuery(
+  table = "actions",
+  select = @["actions.id", "actions.name"],
+  where = whereAnd(@[
+    whereCond("actions.status", "=", "active"),
+    whereOr(@[
+      whereCond("actions.name", "=", "thomas"),
+      whereCond("actions.system", "=", "SYS")
+    ])
+  ])
+)
+
+# Generated SQL:
+# WHERE (actions.status = ? AND (actions.name = ? OR actions.system = ?))
+# Params: @["active", "thomas", "SYS"]
+```
+
+#### UPDATE with grouped WHERE
+
+```nim
+let query = updateQuery(
+  table = "actions",
+  data = @[("name", "updated")],
+  where = whereAnd(@[
+    whereCond("actions.status", "=", "active"),
+    whereOr(@[
+      whereCond("actions.name", "=", "thomas"),
+      whereCond("actions.system", "=", "SYS")
+    ])
+  ])
+)
+```
+
+#### DELETE with grouped WHERE
+
+```nim
+let query = deleteQuery(
+  table = "actions",
+  where = whereOr(@[
+    whereCond("actions.id", "=", "123"),
+    whereCond("actions.project_id", "=", "456")
+  ])
+)
+```
+
+For nested boolean composition, prefer grouped nodes over raw `sql:>` expressions.
+
 ## Security
 
 ### SQL Injection Protection

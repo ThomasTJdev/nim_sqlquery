@@ -23,13 +23,30 @@ proc getDb(): DbConn =
   let port = getEnv("TEST_POSTGRES_PORT", "5432")
   let user = getEnv("TEST_POSTGRES_USER", "test")
   let password = getEnv("TEST_POSTGRES_PASSWORD", "test")
-  let database = getEnv("TEST_POSTGRES_DB", "test")
+  let database = getEnv("TEST_POSTGRES_DB", "nimsqlquery_auto_test")
   let connStr = if port == "5432": host else: host & ":" & port
   result = open(connStr, user, password, database)
   # Caller must close the connection when done (e.g. test uses defer)
 
 
+proc dropAllPublicTables(conn: DbConn) =
+  ## Drop every user table in `public` so the embedded schema can be reapplied from scratch.
+  conn.exec(SqlQuery("""
+    DO $$
+    DECLARE
+      r RECORD;
+    BEGIN
+      FOR r IN
+        SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+      LOOP
+        EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', 'public', r.tablename);
+      END LOOP;
+    END $$;
+  """))
+
+
 proc runSchema(conn: DbConn) =
+  dropAllPublicTables(conn)
   # Each CREATE TABLE ends with ");\n" - split on that so we run complete statements.
   # Splitting on ';' alone would cut inside CREATE TABLE (e.g. after "NULL") and break.
   # Chunks may have leading comments (e.g. "-- Person table..."), so find CREATE TABLE.
@@ -185,6 +202,116 @@ suite "Postgres integration with schema and builders":
         db = db
       )
       check after.rows.len == 0
+
+  test "updateValues with grouped whereAnd/whereOr updates only matching actions":
+    withDb:
+      let actionId1 = insertRow(
+        "actions",
+        @[("name", "Legacy"), ("system", "APP"), ("status", "open")],
+        db = db
+      )
+      let actionId2 = insertRow(
+        "actions",
+        @[("name", "Task A"), ("system", "SYS"), ("status", "open")],
+        db = db
+      )
+      let actionId3 = insertRow(
+        "actions",
+        @[("name", "Task B"), ("system", "SYS"), ("status", "closed")],
+        db = db
+      )
+
+      let updated = updateValues(
+        "actions",
+        @[("status", "archived")],
+        whereAnd(@[
+          whereOr(@[
+            whereCond("actions.system", "=", "SYS"),
+            whereCond("actions.name", "=", "Legacy")
+          ]),
+          whereCond("actions.status", "=", "open")
+        ]),
+        db = db
+      )
+      check updated == 2
+
+      let row1 = selectRowsRuntime(
+        table = "actions",
+        select = @["actions.status"],
+        where = @[("actions.id", "=", $actionId1)],
+        db = db
+      )
+      let row2 = selectRowsRuntime(
+        table = "actions",
+        select = @["actions.status"],
+        where = @[("actions.id", "=", $actionId2)],
+        db = db
+      )
+      let row3 = selectRowsRuntime(
+        table = "actions",
+        select = @["actions.status"],
+        where = @[("actions.id", "=", $actionId3)],
+        db = db
+      )
+      check row1.rows.len == 1 and row1.rows[0][0] == "archived"
+      check row2.rows.len == 1 and row2.rows[0][0] == "archived"
+      check row3.rows.len == 1 and row3.rows[0][0] == "closed"
+
+  test "deleteRows with grouped whereOr supports nested grouping":
+    withDb:
+      let actionId1 = insertRow(
+        "actions",
+        @[("name", "DeleteMe"), ("system", "APP"), ("status", "open")],
+        db = db
+      )
+      let actionId2 = insertRow(
+        "actions",
+        @[("name", "KeepMe"), ("system", "SYS"), ("status", "open")],
+        db = db
+      )
+      let actionId3 = insertRow(
+        "actions",
+        @[("name", "KeepDone"), ("system", "SYS"), ("status", "done")],
+        db = db
+      )
+
+      let deleted = deleteRows(
+        "actions",
+        whereOr(@[
+          whereCond("actions.name", "=", "DeleteMe"),
+          whereAnd(@[
+            whereCond("actions.system", "=", "SYS"),
+            whereCond("actions.status", "=", "open")
+          ])
+        ]),
+        db = db
+      )
+      check deleted == 2
+
+      let deletedRow1 = selectRowsRuntime(
+        table = "actions",
+        select = @["actions.id"],
+        where = @[("actions.id", "=", $actionId1)],
+        db = db
+      )
+      let deletedRow2 = selectRowsRuntime(
+        table = "actions",
+        select = @["actions.id"],
+        where = @[("actions.id", "=", $actionId2)],
+        db = db
+      )
+      let remainingRow3 = selectRowsRuntime(
+        table = "actions",
+        select = @["actions.name", "actions.status"],
+        where = @[("actions.id", "=", $actionId3)],
+        db = db
+      )
+
+      check deletedRow1.rows.len == 0
+      check deletedRow2.rows.len == 0
+      check remainingRow3.rows.len == 1
+      check remainingRow3.rows[0][0] == "KeepDone"
+      check remainingRow3.rows[0][1] == "done"
 
   test "company table insert and select":
     withDb:

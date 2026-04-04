@@ -41,6 +41,18 @@ suite "validateColumns - mixed input customSQL":
     let row = validateColumns(person.id, "COUNT(  company.name)", "SUM(   company.creation)")
     check row != @["person.id", "COUNT(company.name)", "SUM(company.creation)"]
 
+  test "nested function accepts coalesce column reference":
+    let row = validateColumns(
+      person.id,
+      "LOWER(COALESCE(person.name, ''))",
+      "LOWER(COALESCE(company.name, ''))"
+    )
+    check row == @[
+      "person.id",
+      "LOWER(COALESCE(person.name, ''))",
+      "LOWER(COALESCE(company.name, ''))"
+    ]
+
 
 
 suite "validateColumns - mixed input":
