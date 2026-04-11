@@ -4,7 +4,7 @@ An opinionated SQL query builder for Nim with compile-time schema validation. Th
 
 > **Note**: You can use the library in two ways for executing queries:
 > - **With a normal `DbConn`** (e.g. from `std/db_sqlite`, `std/db_postgres`): pass the connection as a named argument to `selectRows(db = ..., ...)`, `selectRow(db = ..., ...)`, `updateValues(db = ..., ...)`, and the other execution macros. **Waterpark is not required** — all of these macros accept `db: DbConn` as the first argument.
-> - **With [waterpark](https://github.com/guzba/waterpark)** for PostgreSQL connection pooling: use the same macros without a connection argument (e.g. `selectRows(table = "...", ...)`); they will use the global `pg` pool.
+> - **With [waterpark](https://github.com/guzba/waterpark)** for PostgreSQL connection pooling: call `initSqlPool(...)` once at startup, then use the same macros without a `db` argument (e.g. `selectRows(table = "...", ...)`); they use that pool.
 >
 > Query generation (`selectQuery`, `insertQuery`, etc.) **does not** require waterpark and works with any database flow.
 
@@ -159,10 +159,13 @@ db.close()
 #### Using `selectRows` with waterpark (optional)
 
 ```nim
-# Initialize your database connection pool (waterpark library)
-pg = newPostgresPool("your_connection_string")
+import waterpark/postgres
+import sqlquery
 
-# Execute query and get all rows (no db argument – uses pg pool)
+# Initialize your database connection pool (waterpark) once at startup.
+initSqlPool(newPostgresPool("your_connection_string"))
+
+# Execute query and get all rows (no db argument – uses the pool from initSqlPool)
 let rows = selectRows(
   table = "users",
   select = @["users.id", "users.name", "users.email"],
@@ -500,7 +503,7 @@ let query = selectQuery(
 Use the generated SQL and parameters with your PostgreSQL connection:
 
 ```nim
-let result = await pg.query(query.sql, query.params)
+await pool.query(query.sql, query.params)  # your Postgres pool or connection API
 ```
 
 ## Runtime vs Compile-time Queries

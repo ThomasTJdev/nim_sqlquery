@@ -374,3 +374,21 @@ suite "Postgres integration with schema and builders":
       check rows.rows.len == 1
       check rows.rows[0][1] == "Authored Project"
       check rows.rows[0][2] == $personId
+
+
+suite "postgres pool":
+  test "postgres pool":
+    let pg = newPostgresPool(2, "localhost", getEnv("TEST_POSTGRES_USER", "test"), getEnv("TEST_POSTGRES_PASSWORD", "test"), getEnv("TEST_POSTGRES_DB", "nimsqlquery_auto_test"))
+    initSqlPool(pg)
+
+    let insert = insertRow(table = "person", data = @[("name", "John"), ("email", "john@example.com"), ("status", "active")])
+    check insert > 0
+
+    let a = selectValue(table = "person", select = "person.id", where = @[("person.id", "=", $insert)])
+    check a == $insert
+
+    let delete = deleteRows(table = "person", where = @[("person.id", "=", $insert)])
+    check delete == 1
+
+    let a2 = selectValue(table = "person", select = "person.id", where = @[("person.id", "=", $insert)])
+    check a2 == ""
