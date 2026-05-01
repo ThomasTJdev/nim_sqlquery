@@ -81,6 +81,26 @@ suite "selectQuery":
     check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project ON project.id = actions.project_id AND project.is_deleted IS NULL WHERE actions.project_id = ? AND actions.status = ? AND actions.is_deleted IS NULL GROUP BY actions.project_id ORDER BY actions.phase DESC, actions.date_end ASC LIMIT 10 OFFSET 1"
     check base.params == @["123", "pending"]
 
+  test "distinct select field":
+    let query = selectQuery(
+      table = "person",
+      select = @["distinct person.email"],
+      where = @[("person.status", "=", "active")]
+    )
+
+    check query.sql == "SELECT distinct person.email FROM person WHERE person.status = ? AND person.is_deleted IS NULL"
+    check query.params == @["active"]
+
+  test "runtime distinct select field without table name":
+    let query = selectQueryRuntime(
+      table = "person",
+      select = @["distinct email"],
+      where = @[("person.status", "=", "active")]
+    )
+
+    check query.sql == "SELECT distinct email FROM person WHERE person.status = ? AND person.is_deleted IS NULL"
+    check query.params == @["active"]
+
   test "user_management_query":
     # Query for active person with their project count and recent activity
     let userQuery = selectQuery(

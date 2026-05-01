@@ -160,6 +160,16 @@ proc parseTable(table: string): string =
   return table
 
 
+proc stripLeadingDistinct(field: string): tuple[field: string, hadDistinct: bool] =
+  ## SQL DISTINCT is emitted as part of the select item, but validation must
+  ## check the field name behind the modifier.
+  const distinctPrefix = "distinct "
+  let stripped = field.strip()
+  if stripped.startsWith(distinctPrefix):
+    return (field: stripped[distinctPrefix.len .. ^1].strip(), hadDistinct: true)
+  return (field: stripped, hadDistinct: false)
+
+
 proc selectAliasesFromSelectList(select: seq[string]): seq[string] =
   ## Extracts explicit SELECT aliases (e.g. "cnt" from "COUNT(*) AS cnt") for use in ORDER BY.
   for item in select:
@@ -529,13 +539,20 @@ proc parseWhere(where: WhereNode, requireTableName = true, table = "", validateS
 proc parseSelect(select: seq[string], requireTableName = true, table = "", tableAsNames: seq[string] = @[]): seq[string] =
   ## The parse select checks all fields and validates them against the schema.
   ## It returns the input fields 1-1 but in lowercase.
-  for field in select:
-    let fieldLower = field.toLowerAscii()
+  for index, field in select:
+    let fieldLower = field.toLowerAscii().strip()
     var fieldStr = fieldLower
+    let distinctInfo = stripLeadingDistinct(fieldStr)
+    if distinctInfo.hadDistinct:
+      if index != 0:
+        sqlError("DISTINCT must be used on the first SELECT field", field)
+      fieldStr = distinctInfo.field
+      if fieldStr.len == 0:
+        sqlError("DISTINCT must be followed by a SELECT field", field)
 
     # If the field is a wildcard, we add it as is.
     if fieldStr.contains("*"):
-      result.add(fieldStr)
+      result.add(fieldLower)
       continue
 
     let fieldSplit = fieldStr.split(" as ")
@@ -548,6 +565,11 @@ proc parseSelect(select: seq[string], requireTableName = true, table = "", table
     if isFunction:
       fieldStr = fieldStr.split("(")[1]
       fieldStr = fieldStr.split(")")[0]
+      let functionDistinct = stripLeadingDistinct(fieldStr)
+      if functionDistinct.hadDistinct:
+        fieldStr = functionDistinct.field
+        if fieldStr.len == 0:
+          sqlError("DISTINCT must be followed by a SELECT field", field)
 
       # If there's a spacing, then there might be a more complex function.
       if fieldStr.contains(" "):
@@ -1116,9 +1138,17 @@ macro selectQuery*(
   if processedSelect != nil and processedSelect.kind == nnkPrefix and processedSelect[0].eqIdent("@"):
     let bracketExpr = processedSelect[1]
     if bracketExpr.kind == nnkBracket:
-      for selectExpr in bracketExpr:
+      for selectIndex in 0 ..< bracketExpr.len:
+        let selectExpr = bracketExpr[selectIndex]
         if selectExpr.kind == nnkStrLit:
           var fieldStr = selectExpr.strVal.toLowerAscii()
+          let distinctInfo = stripLeadingDistinct(fieldStr)
+          if distinctInfo.hadDistinct:
+            if selectIndex != 0:
+              compileError("DISTINCT must be used on the first SELECT field")
+            fieldStr = distinctInfo.field
+            if fieldStr.len == 0:
+              compileError("DISTINCT must be followed by a SELECT field")
           if fieldStr.contains("*"):
             continue
           if fieldStr.contains(" as ") and fieldStr.contains("("):
@@ -1130,6 +1160,11 @@ macro selectQuery*(
           if "(" in fieldStr and ")" in fieldStr:
             fieldStr = fieldStr.split("(")[1]
             fieldStr = fieldStr.split(")")[0]
+            let functionDistinct = stripLeadingDistinct(fieldStr)
+            if functionDistinct.hadDistinct:
+              fieldStr = functionDistinct.field
+              if fieldStr.len == 0:
+                compileError("DISTINCT must be followed by a SELECT field")
             if fieldStr.contains(" "):
               continue
 
