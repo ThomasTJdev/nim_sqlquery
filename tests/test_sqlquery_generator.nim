@@ -283,6 +283,31 @@ suite "selectQuery":
     check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project as p ON p.id = actions.project_id WHERE actions.project_id = ? AND actions.is_deleted IS NULL GROUP BY p.name"
     check base.params == @["123"]
 
+  test "where field names are normalized to lowercase":
+    let base = selectQuery(
+      table = "actions",
+      select = @["actions.id", "actions.name", "actions.status"],
+      joins = @[("project AS p", LEFTJOIN, @[("p.id", "=", "actions.project_id")])],
+      where = @[("Actions.PROJECT_ID", "=", "123")],
+      groupBy = @["p.name"],
+    )
+    check base.sql == "SELECT actions.id, actions.name, actions.status FROM actions LEFT JOIN project as p ON p.id = actions.project_id WHERE actions.project_id = ? AND actions.is_deleted IS NULL GROUP BY p.name"
+    check base.params == @["123"]
+
+    let grouped = selectQuery(
+      table = "actions",
+      select = @["actions.id"],
+      where = whereAnd(@[
+        whereCond("ACTIONS.Status", "=", "active"),
+        whereOr(@[
+          whereCond("Actions.NAME", "=", "thomas"),
+          whereCond("actions.system", "=", "SYS"),
+        ]),
+      ]),
+    )
+    check grouped.sql == "SELECT actions.id FROM actions WHERE (actions.status = ? AND (actions.name = ? OR actions.system = ?)) AND actions.is_deleted IS NULL"
+    check grouped.params == @["active", "thomas", "SYS"]
+
   test "table with reserved word column name (method) using strings":
     # Test table with column named "method" which is a reserved word in Nim.
     # When using string literals, use the original SQL column name "method".
@@ -743,7 +768,7 @@ suite "WHERE operators extended":
       where = @[("actions.project_id", "=", "123"), ("LOWER(COALESCE(actions.name, ''))", "=", "test")]
     )
 
-    check query.sql == "SELECT actions.id, actions.name FROM actions WHERE actions.project_id = ? AND LOWER(COALESCE(actions.name, '')) = ? AND actions.is_deleted IS NULL"
+    check query.sql == "SELECT actions.id, actions.name FROM actions WHERE actions.project_id = ? AND lower(coalesce(actions.name, '')) = ? AND actions.is_deleted IS NULL"
     check query.params == @["123", "test"]
 
 

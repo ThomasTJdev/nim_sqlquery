@@ -264,9 +264,11 @@ proc compileValidateWhereField(
   allowCrossTable: bool,
   contextPrefix: string
 ) =
-  var fieldStr = fieldRaw
-  if fieldStr.startsWith("sql:>"):
+  if fieldRaw.startsWith("sql:>"):
     return
+
+  # Match parseWhereCondition: schema validation is case-insensitive; SQL uses lowercase identifiers.
+  var fieldStr = fieldRaw.toLowerAscii().strip()
 
   # Allow PostgreSQL functions in where clause similarly to runtime parser.
   if "(" in fieldStr:
@@ -387,13 +389,16 @@ proc extractColumnRefs(sqlExpr: string): seq[string] =
   return refs
 
 proc parseWhereCondition(condition: WhereSpec, conditionIndex: int, requireTableName = true, table = "", validateSchema = true): tuple[statement: string, params: seq[string]] =
-  var field = condition[0]
+  let fieldRaw = condition[0]
+  let customSQL = fieldRaw.startsWith("sql:>")
+  # Non-custom fields are normalized like parseSelect so validation matches the schema and emitted SQL is stable.
+  var field = if not customSQL: fieldRaw.toLowerAscii().strip() else: fieldRaw
+
   if field == "project_id" and conditionIndex > 0:
     sqlWarning("project_id within a where statement will in 99% of cases be the first condition. That's our indexes!")
 
   let symbol = condition[1]
   let value = condition[2]
-  let customSQL = field.startsWith("sql:>")
   var skipRestValidation = false
 
   if symbol.len() == 0 and value.len() == 0 and not customSQL:
