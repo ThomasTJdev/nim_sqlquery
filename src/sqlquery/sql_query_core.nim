@@ -249,10 +249,18 @@ proc parseOffset(offset: int): int =
 
 const WhereSymbolList = ["=", "!=", ">", "<", ">=", "<=", "<>", "IN", "NOT IN", "LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE", "IS", "IS NOT", "BETWEEN", "NOT BETWEEN"]
 
+## PostgreSQL: test whether a **scalar** is equal to **some element** of an **array column**
+## (emits `? = ANY(table.col)`, i.e. the bound parameter is the scalar, not a literal array).
+##
+## Tuple form: `("table.array_column", WhereScalarInAnyArrayCol, value)`.
+const WhereScalarInAnyArrayCol* = "? = ANY(column)"
+
 proc compileValidateWhereSymbol(symbolStr: string) =
   if symbolStr.startsWith("= ANY(::") or symbolStr.startsWith("<> ALL(::"):
     compileError("= ANY(::) or <> ALL(::) is not supported. Use = ANY(?::type[]) or <> ALL(?::type[]) instead")
-  if symbolStr.len > 0 and symbolStr notin WhereSymbolList and not symbolStr.startsWith("= ANY(?") and not symbolStr.startsWith("<> ALL(?"):
+  let isArrayLiteralParamAny = symbolStr.startsWith("= ANY(?") or symbolStr.startsWith("<> ALL(?")
+  let isScalarInPgArrayColumn = symbolStr == WhereScalarInAnyArrayCol
+  if symbolStr.len > 0 and symbolStr notin WhereSymbolList and not isArrayLiteralParamAny and not isScalarInPgArrayColumn:
     if symbolStr == "IN" or symbolStr == "NOT IN":
       compileError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) or <> ALL(?::type[]) instead")
     compileError("Invalid symbol: " & symbolStr & ". Allowed symbols: " & WhereSymbolList.join(", "))
@@ -450,7 +458,9 @@ proc parseWhereCondition(condition: WhereSpec, conditionIndex: int, requireTable
         sqlError("[WHERE] Field '" & fieldStr & "' does not exist in table '" & validation.tableName & "'", condition)
 
     if not skipRestValidation:
-      if symbol notin WhereSymbolList and not symbol.startsWith("= ANY(?") and not symbol.startsWith("<> ALL(?"):
+      let isArrayLiteralParamAny = symbol.startsWith("= ANY(?") or symbol.startsWith("<> ALL(?")
+      let isScalarInPgArrayColumn = symbol == WhereScalarInAnyArrayCol
+      if symbol notin WhereSymbolList and not isArrayLiteralParamAny and not isScalarInPgArrayColumn:
         if symbol == "IN" or symbol == "NOT IN":
           sqlError("IN and NOT IN symbols are not allowed. Use = ANY(?::type[]) or <> ALL(?::type[]) instead", condition)
         sqlError("Invalid symbol: " & symbol, "Allowed symbols: " & WhereSymbolList.join(", "), condition)
@@ -478,6 +488,13 @@ proc parseWhereCondition(condition: WhereSpec, conditionIndex: int, requireTable
     statement = field
     # Param may still be needed when raw SQL contains ? (e.g. <> ALL(?::int[])).
     if value.len() > 0:
+      params.add(value)
+  elif symbol == WhereScalarInAnyArrayCol:
+    # Parameter is the scalar; `field` is the array-typed column (validated above).
+    if valueLower == "null":
+      statement = "NULL = ANY(" & field & ")"
+    else:
+      statement = "? = ANY(" & field & ")"
       params.add(value)
   elif valueLower == "null":
     statement = field & " " & symbol & " NULL"

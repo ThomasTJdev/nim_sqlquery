@@ -1,6 +1,7 @@
 import unittest
 import std/strutils
 import sqlquery/sql_query_generator
+import sqlquery/sql_query_core
 import sqlquery/sql_schema_validator
 
 
@@ -39,6 +40,49 @@ suite "selectQuery":
         )
     check base.sql == "SELECT actions.id, actions.name FROM actions WHERE actions.status <> ALL(?::text[]) AND actions.id > ? AND actions.is_deleted IS NULL"
     check base.params == @["{cancelled,archived}", "0"]
+
+  test "scalar member of PostgreSQL array column (native ? = ANY(column))":
+    ## Binds the **scalar** as `?` and references the **array column** inside `ANY(...)`.
+    let base = selectQuery(
+      table = "company",
+      select = @["company.id"],
+      where = @[("company.email_domains", WhereScalarInAnyArrayCol, "example.com")],
+      limit = 1,
+    )
+    check base.sql == "SELECT company.id FROM company WHERE ? = ANY(company.email_domains) LIMIT 1"
+    check base.params == @["example.com"]
+
+  test "native ? = ANY(column) with grouped OR (NULL or FALSE)":
+    let base = selectQuery(
+      table = "company",
+      select = @["company.id"],
+      where = whereAnd(@[
+        whereCond("company.email_domains", WhereScalarInAnyArrayCol, "example.com"),
+        whereOr(@[
+          whereCond("company.deactivated", "IS", "NULL"),
+          whereCond("company.deactivated", "IS", "false"),
+        ]),
+      ]),
+      limit = 1,
+    )
+    check base.sql == "SELECT company.id FROM company WHERE (? = ANY(company.email_domains) AND (company.deactivated IS NULL OR company.deactivated IS false)) LIMIT 1"
+    check base.params == @["example.com"]
+
+  test "runtime: native ? = ANY(column) and NULL literal without bind param":
+    let base = selectQueryRuntime(
+      table = "company",
+      select = @["company.id"],
+      where = @[("company.email_domains", WhereScalarInAnyArrayCol, "null")],
+    )
+    check base.sql == "SELECT company.id FROM company WHERE NULL = ANY(company.email_domains)"
+    check base.params == newSeq[string]()
+
+  test "invalid symbol for scalar-in-array-column must not compile":
+    check not compiles(selectQuery(
+      table = "company",
+      select = @["company.id"],
+      where = @[("company.email_domains", "? = ANY(columns)", "x")],
+    ))
 
   test "override where structure":
     let base = selectQuery(

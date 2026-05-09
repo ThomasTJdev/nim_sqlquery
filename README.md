@@ -373,6 +373,23 @@ let query2 = selectQuery(
 # Parameters: @["{cancelled,archived}"]  # SAFE - parameterized
 ```
 
+** Safe - Scalar in a PostgreSQL array column**
+
+When the **parameter is a scalar** and Membership is checked against an **array-typed column**, use `WhereScalarInAnyArrayCol` (the string `? = ANY(column)`). This generates `? = ANY(table.arr_col)` with one bound parameter (the scalar), unlike `= ANY(?::type[])` where the **parameter is the array literal**.
+
+```nim
+import sqlquery/sql_query_generator
+
+# Match a single email domain against company.email_domains TEXT[]
+let query = selectQuery(
+  table = "company",
+  select = @["company.id"],
+  where = @[("company.email_domains", WhereScalarInAnyArrayCol, userDomain)],
+)
+# Generated SQL: WHERE ? = ANY(company.email_domains)
+# Parameters: @[userDomain]
+```
+
 ### Escape Hatches - Use with Extreme Caution
 
 The library provides escape hatches for advanced use cases. **These bypass validation and can introduce SQL injection vulnerabilities if misused.** Only use these with trusted, compile-time constants or carefully validated input.
