@@ -1247,3 +1247,91 @@ suite "runtime error handling":
       where = @[("actions.id", "=", "1")]
     )
     check query.sql.len > 0  # Just verify the query works with valid input
+
+
+# ============================================================================
+# Extended Tests - PostgreSQL JSON path operators in WHERE / SELECT
+# ============================================================================
+# Only the base column (e.g. "person.metadata") is validated against the schema.
+# The trailing path (e.g. "->'company'->>'name'") passes through to PostgreSQL.
+# Everything is lowercased as usual via toLowerAscii.
+
+suite "WHERE with JSON path operators":
+  test "basic -> and ->> on JSONB column":
+    let query = selectQuery(
+      table = "person",
+      select = @["person.id", "person.name"],
+      where = @[("person.metadata->'company'->>'name'", "=", "Acme")]
+    )
+    check query.sql == "SELECT person.id, person.name FROM person WHERE person.metadata->'company'->>'name' = ? AND person.is_deleted IS NULL"
+    check query.params == @["Acme"]
+
+  test "JSON path with IS NOT NULL (no parameter)":
+    let query = selectQuery(
+      table = "person",
+      select = @["person.id"],
+      where = @[("person.metadata->'company'", "IS NOT", "NULL")]
+    )
+    check query.sql == "SELECT person.id FROM person WHERE person.metadata->'company' IS NOT NULL AND person.is_deleted IS NULL"
+    check query.params.len == 0
+
+  test "JSON path combined with regular condition":
+    let query = selectQuery(
+      table = "person",
+      select = @["person.id", "person.name"],
+      where = @[
+        ("person.status", "=", "active"),
+        ("person.metadata->'company'->>'name'", "ILIKE", "%acme%"),
+      ]
+    )
+    check query.sql == "SELECT person.id, person.name FROM person WHERE person.status = ? AND person.metadata->'company'->>'name' ILIKE ? AND person.is_deleted IS NULL"
+    check query.params == @["active", "%acme%"]
+
+  test "JSON path inside grouped where (whereOr / whereAnd)":
+    let query = selectQuery(
+      table = "person",
+      select = @["person.id"],
+      where = whereAnd(@[
+        whereCond("person.status", "=", "active"),
+        whereOr(@[
+          whereCond("person.metadata->>'tier'", "=", "gold"),
+          whereCond("person.metadata->>'tier'", "=", "platinum"),
+        ]),
+      ])
+    )
+    check query.sql == "SELECT person.id FROM person WHERE (person.status = ? AND (person.metadata->>'tier' = ? OR person.metadata->>'tier' = ?)) AND person.is_deleted IS NULL"
+    check query.params == @["active", "gold", "platinum"]
+
+  test "invalid base column in WHERE JSON path fails to compile":
+    check not compiles(selectQuery(
+      table = "person",
+      select = @["person.id"],
+      where = @[("person.notacolumn->'company'->>'name'", "=", "Acme")]
+    ))
+
+
+suite "SELECT with JSON path operators":
+  test "basic -> and ->> on JSONB column":
+    let query = selectQuery(
+      table = "person",
+      select = @["person.id", "person.metadata->'company'->>'name'"],
+      where = @[("person.id", "=", "1")]
+    )
+    check "person.metadata->'company'->>'name'" in query.sql
+    check query.params == @["1"]
+
+  test "JSON path with AS alias":
+    let query = selectQuery(
+      table = "person",
+      select = @["person.id", "person.metadata->'company'->>'name' AS company_name"],
+      where = @[("person.id", "=", "1")]
+    )
+    check "person.metadata->'company'->>'name' as company_name" in query.sql
+    check query.params == @["1"]
+
+  test "invalid base column in SELECT JSON path fails to compile":
+    check not compiles(selectQuery(
+      table = "person",
+      select = @["person.id", "person.notacolumn->'company'->>'name'"],
+      where = @[("person.id", "=", "1")]
+    ))

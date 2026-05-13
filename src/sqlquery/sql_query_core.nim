@@ -170,6 +170,7 @@ proc stripLeadingDistinct(field: string): tuple[field: string, hadDistinct: bool
   return (field: stripped, hadDistinct: false)
 
 
+
 proc selectAliasesFromSelectList(select: seq[string]): seq[string] =
   ## Extracts explicit SELECT aliases (e.g. "cnt" from "COUNT(*) AS cnt") for use in ORDER BY.
   for item in select:
@@ -277,6 +278,13 @@ proc compileValidateWhereField(
 
   # Match parseWhereCondition: schema validation is case-insensitive; SQL uses lowercase identifiers.
   var fieldStr = fieldRaw.toLowerAscii().strip()
+
+  # JSON path operator (-> or ->>): only validate the base column. The trailing
+  # path (e.g. ->'company'->>'publicName') is passed through to PostgreSQL at
+  # runtime, where JSON keys are case-sensitive and intentionally not normalized.
+  let arrowIdx = fieldStr.find("->")
+  if arrowIdx != -1:
+    fieldStr = fieldStr[0 ..< arrowIdx].strip()
 
   # Allow PostgreSQL functions in where clause similarly to runtime parser.
   if "(" in fieldStr:
@@ -420,7 +428,9 @@ proc parseWhereCondition(condition: WhereSpec, conditionIndex: int, requireTable
     discard
 
   elif validateSchema and not customSQL:
-    var fieldStr = field
+    # For JSON path expressions (e.g. "person.metadata->'company'->>'name'"),
+    # validate only the base column before the first "->".
+    var fieldStr = field.split("->")[0].strip()
     var validatedFunctionRefs = false
 
     # Allow to use PostgreSQL functions in where clause, like:
@@ -601,6 +611,11 @@ proc parseSelect(select: seq[string], requireTableName = true, table = "", table
       if not validateFieldExists(fieldStr).valid:
         result.add(fieldLower)
         continue
+
+    # JSON path expression (e.g. "person.metadata->'company'->>'name'"):
+    # validate only the base column before the first "->".
+    if "->" in fieldStr:
+      fieldStr = fieldStr.split("->")[0].strip()
 
     if not requireTableName and "." notin fieldStr and table != "":
       if not validateFieldExists(fieldStr).valid and not validateFieldExists(table & "." & fieldStr).valid:
@@ -1175,6 +1190,12 @@ macro selectQuery*(
             continue
           if fieldStr.contains(" as ") and fieldStr.contains("("):
             continue
+
+          # JSON path expression (e.g. "person.metadata->'company'->>'name'"):
+          # validate only the base column before the first "->".
+          if "->" in fieldStr:
+            fieldStr = fieldStr.split("->")[0].strip()
+
           if "." notin fieldStr and joins != nil:
             compileError("[selectQuery - SELECT] Field '" & `fieldStr` & "' is missing table name. Table names are required when using joins.")
 
