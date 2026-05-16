@@ -131,6 +131,57 @@ suite "validateTable":
     let row = validateTable("actions")
     check row == "actions"
 
+  test "scoped_document DDL with inline REFERENCES and trailing CHECK parses columns only":
+    let row = validateTable("scoped_document")
+    check row == "scoped_document"
+
+
+suite "scoped_document (complex DDL column extraction)":
+  ## Enum fields must exclude CONSTRAINT bodies (lines starting with '(', OR, AND, ')').
+
+  test "validateColumns accepts real columns from scoped_document":
+    let row = validateColumns(
+      scoped_document.id,
+      scoped_document.correlation_token,
+      scoped_document.owner_profile_id,
+      scoped_document.company_id,
+      scoped_document.project_id,
+      scoped_document.is_workspace_wide,
+      scoped_document.is_provisional,
+      scoped_document.tier_label,
+      scoped_document.title,
+      scoped_document.body,
+      scoped_document.appendix,
+      scoped_document.facets,
+      scoped_document.glyph,
+      scoped_document.segment,
+      scoped_document.opened_at,
+      scoped_document.updated_at,
+    )
+    check row == @[
+      "scoped_document.id",
+      "scoped_document.correlation_token",
+      "scoped_document.owner_profile_id",
+      "scoped_document.company_id",
+      "scoped_document.project_id",
+      "scoped_document.is_workspace_wide",
+      "scoped_document.is_provisional",
+      "scoped_document.tier_label",
+      "scoped_document.title",
+      "scoped_document.body",
+      "scoped_document.appendix",
+      "scoped_document.facets",
+      "scoped_document.glyph",
+      "scoped_document.segment",
+      "scoped_document.opened_at",
+      "scoped_document.updated_at",
+    ]
+
+  test "compile-time rejection for CHECK-body tokens if they were mis-parsed as columns":
+    ## SQL `OR` / `AND` lines use Nim reserved words; wrongly emitted fields would be `nim_*`.
+    check not compiles(validateColumns(scoped_document.nim_or))
+    check not compiles(validateColumns(scoped_document.nim_and))
+
 
 suite "db - enum to string":
 

@@ -70,3 +70,32 @@ CREATE TABLE IF NOT EXISTS api_requests (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   is_deleted TIMESTAMP DEFAULT NULL
 );
+
+-- Regression coverage: mixed inline constraints, REFERENCES, CHECK on columns,
+-- and a trailing multi-line CONSTRAINT with parenthesized/OR/AND lines (parser
+-- must emit only real column names as enum fields).
+CREATE TABLE IF NOT EXISTS scoped_document (
+  id SERIAL PRIMARY KEY,
+  correlation_token UUID NOT NULL UNIQUE,
+  owner_profile_id INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+  company_id INTEGER REFERENCES company(id) ON DELETE CASCADE,
+  project_id INTEGER REFERENCES project(id) ON DELETE CASCADE,
+  is_workspace_wide BOOLEAN NOT NULL DEFAULT FALSE,
+  is_provisional BOOLEAN NOT NULL DEFAULT FALSE,
+  tier_label TEXT NOT NULL CHECK (tier_label IN ('core','extended','delegated','system')),
+  title JSONB NOT NULL,
+  body JSONB NOT NULL,
+  appendix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  facets JSONB NOT NULL DEFAULT '[]'::jsonb,
+  glyph TEXT,
+  segment TEXT NOT NULL DEFAULT 'neutral' CHECK (segment IN ('alpha','beta','gamma','general','neutral')),
+  opened_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+
+  CONSTRAINT scoped_document_tier_alignment CHECK (
+    (tier_label = 'core' AND project_id IS NULL AND company_id IS NULL AND is_workspace_wide = FALSE)
+    OR (tier_label = 'extended'  AND project_id IS NOT NULL AND is_workspace_wide = FALSE)
+    OR (tier_label = 'delegated' AND company_id IS NOT NULL AND project_id IS NULL AND is_workspace_wide = FALSE)
+    OR (tier_label = 'system'   AND is_workspace_wide = TRUE  AND project_id IS NULL AND company_id IS NULL)
+  )
+);

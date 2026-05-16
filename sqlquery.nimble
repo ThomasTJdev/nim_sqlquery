@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.2.4"
+version       = "0.2.5"
 author        = "ThomasTJdev"
 description   = "SQL query builder and validator - opiniated"
 license       = "MIT"

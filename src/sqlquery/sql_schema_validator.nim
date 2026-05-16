@@ -121,7 +121,16 @@ macro generateEnumsFromSQL(dir: static string): untyped =
 
       for line in columnsBlock.splitLines():
         let cleanLine = line.strip().split(" ")[0]
-        if cleanLine.len > 0 and cleanLine notin ["FOREIGN", "PRIMARY", "KEY", "REFERENCES"]:
+        let isConstraintLine =
+          cleanLine.len > 0 and (
+            cleanLine.startsWith("(") or
+            cleanLine.startsWith(")") or
+            cleanLine in [
+              "foreign", "primary", "references", "constraint", "unique",
+              "check", "or", "and"
+            ]
+          )
+        if cleanLine.len > 0 and not isConstraintLine:
           columns.add(cleanLine)
 
       if columns.len == 0: continue

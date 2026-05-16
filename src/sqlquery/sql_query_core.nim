@@ -105,6 +105,18 @@ proc sqlWarning(message: varargs[string, `$`]) =
   # raise newException(SqlQueryWarning, warningMsg)
 
 
+proc bareFieldName(selectItem: string): string =
+  ## Extracts the actual field identifier from a select item that may carry
+  ## SQL modifiers before the field name, e.g.:
+  ##   "DISTINCT ON (tbl.col) tbl.id"  ->  "tbl.id"
+  ##   "tbl.name"                       ->  "tbl.name"
+  ## Uses rfind so no seq is allocated; caller should gate with ' ' in selectItem
+  ## to avoid even this cost for the common case of plain field names.
+  let lastSpace = selectItem.rfind(' ')
+  if lastSpace >= 0: selectItem[lastSpace + 1 .. ^1]
+  else: selectItem
+
+
 #
 # Result parsers
 #
@@ -116,22 +128,29 @@ proc get*(data: RowSelectionData, field: string): string {.raises: [].} =
 
   let fieldLower = field.toLowerAscii()
   for i, selectedField in data.selected:
-    if selectedField == fieldLower:
+    # Common case: exact match. Only pay for bareFieldName when spaces are present
+    # (i.e. the item carries a modifier like "DISTINCT ON (...) tbl.field").
+    if selectedField == fieldLower or
+        (' ' in selectedField and bareFieldName(selectedField) == fieldLower):
       if i < data.row.len: return data.row[i]
       return ""
 
   if "." notin fieldLower:
     let fieldName = data.table & "." & fieldLower
     for i, selectedField in data.selected:
-      if selectedField == fieldName:
+      if selectedField == fieldName or
+          (' ' in selectedField and bareFieldName(selectedField) == fieldName):
         if i < data.row.len: return data.row[i]
         return ""
 
   for i, selectedField in data.selected:
+    # Only allocate a lowercased copy when " as " could actually be present.
+    if ' ' notin selectedField:
+      continue
     let selectedFieldLower = selectedField.toLowerAscii()
-    if selectedFieldLower.contains(" as "):
+    if " as " in selectedFieldLower:
       let fieldName = selectedFieldLower.split(" as ")
-      if fieldName[0] == fieldLower:
+      if fieldName[0] == fieldLower or bareFieldName(fieldName[0]) == fieldLower:
         if i < data.row.len: return data.row[i]
         return ""
       if fieldName[1] == fieldLower:

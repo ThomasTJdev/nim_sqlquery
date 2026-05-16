@@ -422,6 +422,31 @@ suite "select get()":
     check rowData.get("action_name") == "test"
     check rowData.get("action_status") == "pending"
 
+  test "DISTINCT ON prefix: get() resolves field behind DISTINCT ON (...)":
+    # Simulates: select = @["DISTINCT ON (actions.name) actions.id", "actions.status"]
+    # The selected list stores the full decorated string; get() must look past
+    # the "DISTINCT ON (...)" modifier to find the bare field name.
+    var rowData: RowSelectionData = (
+      table: "actions",
+      selected: @["distinct on (actions.name) actions.id", "actions.status"],
+      row: @["42", "pending"],
+    )
+
+    check rowData.get("actions.id") == "42"
+    check rowData.get("actions.status") == "pending"
+
+  test "DISTINCT ON prefix: get() resolves field without table qualifier":
+    # Same scenario but queried by short name only (no table prefix).
+    # The fallback path prepends the base table to find "actions.id".
+    var rowData: RowSelectionData = (
+      table: "actions",
+      selected: @["distinct on (actions.name) actions.id", "actions.status"],
+      row: @["99", "active"],
+    )
+
+    check rowData.get("id") == "99"
+    check rowData.get("status") == "active"
+
 
 
 suite "deleteQuery":
